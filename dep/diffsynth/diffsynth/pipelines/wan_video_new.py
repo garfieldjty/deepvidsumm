@@ -1696,6 +1696,7 @@ def model_fn_longcat_video_inbetween(
     longcat_end_latents: torch.Tensor = None,
     use_gradient_checkpointing=False,
     use_gradient_checkpointing_offload=False,
+    **kwargs  # Accept additional models that may be passed but not used
 ):
     """
     Model function for LongCat video in-between task.
@@ -1710,6 +1711,7 @@ def model_fn_longcat_video_inbetween(
         longcat_end_latents: Ending frame latents for conditioning [B, C, T_end, H, W]
         use_gradient_checkpointing: Whether to use gradient checkpointing
         use_gradient_checkpointing_offload: Whether to offload gradient checkpointing
+        **kwargs: Additional models (motion_controller, vace, etc.) that are not used in this task
     
     Returns:
         Model output (noise prediction)

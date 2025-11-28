@@ -4,8 +4,8 @@
 
 # Use uv to run accelerate with proper dependencies
 uv run accelerate launch examples/wanvideo/model_training/train_inbetween.py \
-  --dataset_base_path /home/tjiao/cv_proj/dep/clipshots/videos/ClipShots_extracted/ClipShots/videos/train \
-  --dataset_metadata_path /home/tjiao/cv_proj/dep/diffsynth/data/inbetween/metadata.csv \
+  --dataset_base_path /workspace/deepvidsumm/dep/diffsynth/data/between/ \
+  --dataset_metadata_path /workspace/deepvidsumm/dep/diffsynth/data/between/metadata.csv \
   --dataset_repeat 1 \
   --model_id_with_origin_paths "meituan-longcat/LongCat-Video:dit/diffusion_pytorch_model*.safetensors,Wan-AI/Wan2.1-T2V-14B:models_t5_umt5-xxl-enc-bf16.pth,Wan-AI/Wan2.1-T2V-14B:Wan2.1_VAE.pth" \
   --learning_rate 1e-4 \

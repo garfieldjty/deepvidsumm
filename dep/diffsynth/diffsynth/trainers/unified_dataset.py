@@ -285,7 +285,21 @@ class UnifiedDataset(torch.utils.data.Dataset):
         num_frames=81, time_division_factor=4, time_division_remainder=1,
         start_frame_index=0,
     ):
+        # Create a custom operator for handling dict with path
+        class DictToAbsolutePath(DataProcessingOperator):
+            def __init__(self, base_path):
+                self.base_path = base_path
+            def __call__(self, data):
+                result = data.copy()
+                result['path'] = os.path.join(self.base_path, data['path'])
+                return result
+        
         return RouteByType(operator_map=[
+            (dict, DictToAbsolutePath(base_path) >> LoadVideo(
+                num_frames, time_division_factor, time_division_remainder,
+                frame_processor=ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor),
+                start_frame_index=start_frame_index,
+            )),
             (str, ToAbsolutePath(base_path) >> RouteByExtensionName(operator_map=[
                 (("jpg", "jpeg", "png", "webp"), LoadImage() >> ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor) >> ToList()),
                 (("gif",), LoadGIF(
@@ -325,6 +339,8 @@ class UnifiedDataset(torch.utils.data.Dataset):
             self.data = metadata
         else:
             metadata = pandas.read_csv(metadata_path)
+            # Convert NaN values to empty strings to avoid type issues
+            metadata = metadata.fillna("")
             self.data = [metadata.iloc[i].to_dict() for i in range(len(metadata))]
 
     def __getitem__(self, data_id):
