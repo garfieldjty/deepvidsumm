@@ -39,23 +39,46 @@ def main():
     parser.add_argument("--height", type=int, default=480, help="Video height")
     parser.add_argument("--width", type=int, default=832, help="Video width")
     parser.add_argument("--num_inference_steps", type=int, default=50, help="Number of denoising steps")
-    parser.add_argument("--cfg_scale", type=float, default=5.0, help="Classifier-free guidance scale")
+    parser.add_argument("--cfg_scale", type=float, default=2.0, help="Classifier-free guidance scale")
+    parser.add_argument("--sigma_shift", type=float, default=1.0, help="Sigma shift for scheduler")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--tiled", action="store_true", default=True, help="Use tiled VAE encoding/decoding")
+    parser.add_argument("--fps", type=int, default=15, help="Output video FPS")
+    parser.add_argument("--quality", type=int, default=5, help="Output video quality (1-10)")
     
     args = parser.parse_args()
     
-    # Load the pipeline
-    print("Loading models...")
+    # Load the pipeline with base models
+    print("Loading base models...")
+    from diffsynth.pipelines.wan_video_new import ModelConfig
     pipe = WanVideoPipeline.from_pretrained(
         torch_dtype=torch.bfloat16,
-        device="cuda"
+        device="cuda",
+        model_configs=[
+            ModelConfig(model_id="meituan-longcat/LongCat-Video", origin_file_pattern="dit/diffusion_pytorch_model*.safetensors", offload_device="cpu"),
+            ModelConfig(model_id="Wan-AI/Wan2.1-T2V-14B", origin_file_pattern="models_t5_umt5-xxl-enc-bf16.pth", offload_device="cpu"),
+            ModelConfig(model_id="Wan-AI/Wan2.1-T2V-14B", origin_file_pattern="Wan2.1_VAE.pth", offload_device="cpu"),
+        ]
     )
+    pipe.enable_vram_management()
     
     # Load the trained LoRA weights
     print(f"Loading LoRA from {args.model_path}...")
+    import os
+    # If model_path is a directory, find the latest checkpoint
+    if os.path.isdir(args.model_path):
+        checkpoints = sorted([f for f in os.listdir(args.model_path) if f.endswith('.safetensors')])
+        if checkpoints:
+            lora_path = os.path.join(args.model_path, checkpoints[-1])
+            print(f"Using checkpoint: {checkpoints[-1]}")
+        else:
+            raise ValueError(f"No .safetensors files found in {args.model_path}")
+    else:
+        lora_path = args.model_path
+    
     pipe.load_lora(
         pipe.dit,
-        lora_config=args.model_path,
+        lora_config=lora_path,
         alpha=1.0,
     )
     
@@ -82,12 +105,14 @@ def main():
         num_frames=args.num_frames,
         num_inference_steps=args.num_inference_steps,
         cfg_scale=args.cfg_scale,
+        sigma_shift=args.sigma_shift,
         seed=args.seed,
+        tiled=args.tiled,
     )
     
     # Save the output
     print(f"Saving video to {args.output_path}...")
-    save_video(video, args.output_path, fps=24)
+    save_video(video, args.output_path, fps=args.fps, quality=args.quality)
     print("Done!")
 
 
