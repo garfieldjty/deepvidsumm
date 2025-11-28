@@ -1717,20 +1717,19 @@ def model_fn_longcat_video_inbetween(
         Model output (noise prediction)
     """
     num_cond_latents = 0
+    num_end_cond_latents = 0
     
     # Set starting frames as conditional
     if longcat_start_latents is not None:
         num_start_frames = longcat_start_latents.shape[2]
         latents[:, :, :num_start_frames] = longcat_start_latents
-        num_cond_latents += num_start_frames
+        num_cond_latents = num_start_frames
     
     # Set ending frames as conditional
     if longcat_end_latents is not None:
         num_end_frames = longcat_end_latents.shape[2]
         latents[:, :, -num_end_frames:] = longcat_end_latents
-        # Note: For the in-between task, we only count start frames in num_cond_latents
-        # The end frames are handled separately by fixing them in place
-        # The model will learn to interpolate between the fixed start and end frames
+        num_end_cond_latents = num_end_frames
     
     context = context.unsqueeze(0)
     encoder_attention_mask = torch.any(context != 0, dim=-1)[:, 0].to(torch.int64)
@@ -1740,6 +1739,7 @@ def model_fn_longcat_video_inbetween(
         context,
         encoder_attention_mask,
         num_cond_latents=num_cond_latents,
+        num_end_cond_latents=num_end_cond_latents,
         use_gradient_checkpointing=use_gradient_checkpointing,
         use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
     )

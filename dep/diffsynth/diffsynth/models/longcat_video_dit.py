@@ -177,7 +177,7 @@ class Attention(nn.Module):
         x = rearrange(x, "B S (H D) -> B H S D", H=self.num_heads)
         return x
 
-    def forward(self, x: torch.Tensor, shape=None, num_cond_latents=None, return_kv=False) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, shape=None, num_cond_latents=None, num_end_cond_latents=0, return_kv=False) -> torch.Tensor:
         """
         """
         B, N, C = x.shape
@@ -196,16 +196,42 @@ class Attention(nn.Module):
         # cond mode
         if num_cond_latents is not None and num_cond_latents > 0:
             num_cond_latents_thw = num_cond_latents * (N // shape[0])
-            # process the condition tokens
-            q_cond = q[:, :, :num_cond_latents_thw].contiguous()
-            k_cond = k[:, :, :num_cond_latents_thw].contiguous()
-            v_cond = v[:, :, :num_cond_latents_thw].contiguous()
-            x_cond = self._process_attn(q_cond, k_cond, v_cond, shape)
-            # process the noise tokens
-            q_noise = q[:, :, num_cond_latents_thw:].contiguous()
-            x_noise = self._process_attn(q_noise, k, v, shape)
-            # merge x_cond and x_noise
-            x = torch.cat([x_cond, x_noise], dim=2).contiguous()
+            num_end_cond_latents_thw = num_end_cond_latents * (N // shape[0])
+            
+            if num_end_cond_latents_thw > 0:
+                # In-between mode: conditioning at both start and end
+                # Split into: [start_cond | middle_noise | end_cond]
+                q_start_cond = q[:, :, :num_cond_latents_thw].contiguous()
+                k_start_cond = k[:, :, :num_cond_latents_thw].contiguous()
+                v_start_cond = v[:, :, :num_cond_latents_thw].contiguous()
+                
+                q_end_cond = q[:, :, -num_end_cond_latents_thw:].contiguous()
+                k_end_cond = k[:, :, -num_end_cond_latents_thw:].contiguous()
+                v_end_cond = v[:, :, -num_end_cond_latents_thw:].contiguous()
+                
+                q_noise = q[:, :, num_cond_latents_thw:-num_end_cond_latents_thw].contiguous()
+                
+                # Process conditioning frames with self-attention only
+                x_start_cond = self._process_attn(q_start_cond, k_start_cond, v_start_cond, shape)
+                x_end_cond = self._process_attn(q_end_cond, k_end_cond, v_end_cond, shape)
+                
+                # Process noise tokens with attention to all frames (including conditioning)
+                x_noise = self._process_attn(q_noise, k, v, shape)
+                
+                # Merge back: [start_cond | middle_noise | end_cond]
+                x = torch.cat([x_start_cond, x_noise, x_end_cond], dim=2).contiguous()
+            else:
+                # Original mode: conditioning only at start
+                # process the condition tokens
+                q_cond = q[:, :, :num_cond_latents_thw].contiguous()
+                k_cond = k[:, :, :num_cond_latents_thw].contiguous()
+                v_cond = v[:, :, :num_cond_latents_thw].contiguous()
+                x_cond = self._process_attn(q_cond, k_cond, v_cond, shape)
+                # process the noise tokens
+                q_noise = q[:, :, num_cond_latents_thw:].contiguous()
+                x_noise = self._process_attn(q_noise, k, v, shape)
+                # merge x_cond and x_noise
+                x = torch.cat([x_cond, x_noise], dim=2).contiguous()
         else:
             x = self._process_attn(q, k, v, shape)
 
@@ -300,7 +326,7 @@ class MultiHeadCrossAttention(nn.Module):
         x = self.proj(x)
         return x
 
-    def forward(self, x, cond, kv_seqlen, num_cond_latents=None, shape=None):
+    def forward(self, x, cond, kv_seqlen, num_cond_latents=None, num_end_cond_latents=0, shape=None):
         """
             x: [B, N, C]
             cond: [B, M, C]
@@ -312,12 +338,25 @@ class MultiHeadCrossAttention(nn.Module):
             if num_cond_latents is not None and num_cond_latents > 0:
                 assert shape is not None, "SHOULD pass in the shape"
                 num_cond_latents_thw = num_cond_latents * (N // shape[0])
-                x_noise = x[:, num_cond_latents_thw:] # [B, N_noise, C]
-                output_noise = self._process_cross_attn(x_noise, cond, kv_seqlen) # [B, N_noise, C]
-                output = torch.cat([
-                    torch.zeros((B, num_cond_latents_thw, C), dtype=output_noise.dtype, device=output_noise.device),
-                    output_noise
-                ], dim=1).contiguous()
+                num_end_cond_latents_thw = num_end_cond_latents * (N // shape[0])
+                
+                if num_end_cond_latents_thw > 0:
+                    # In-between mode: skip cross-attention for both start and end conditioning frames
+                    x_noise = x[:, num_cond_latents_thw:-num_end_cond_latents_thw] # [B, N_noise, C]
+                    output_noise = self._process_cross_attn(x_noise, cond, kv_seqlen) # [B, N_noise, C]
+                    output = torch.cat([
+                        torch.zeros((B, num_cond_latents_thw, C), dtype=output_noise.dtype, device=output_noise.device),
+                        output_noise,
+                        torch.zeros((B, num_end_cond_latents_thw, C), dtype=output_noise.dtype, device=output_noise.device)
+                    ], dim=1).contiguous()
+                else:
+                    # Original mode: skip cross-attention only for start conditioning frames
+                    x_noise = x[:, num_cond_latents_thw:] # [B, N_noise, C]
+                    output_noise = self._process_cross_attn(x_noise, cond, kv_seqlen) # [B, N_noise, C]
+                    output = torch.cat([
+                        torch.zeros((B, num_cond_latents_thw, C), dtype=output_noise.dtype, device=output_noise.device),
+                        output_noise
+                    ], dim=1).contiguous()
             else:
                 raise NotImplementedError
                 
@@ -569,7 +608,7 @@ class LongCatSingleStreamBlock(nn.Module):
         )
         self.ffn = FeedForwardSwiGLU(dim=hidden_size, hidden_dim=int(hidden_size * mlp_ratio))
 
-    def forward(self, x, y, t, y_seqlen, latent_shape, num_cond_latents=None, return_kv=False, kv_cache=None, skip_crs_attn=False):
+    def forward(self, x, y, t, y_seqlen, latent_shape, num_cond_latents=None, num_end_cond_latents=0, return_kv=False, kv_cache=None, skip_crs_attn=False):
         """
             x: [B, N, C]
             y: [1, N_valid_tokens, C]
@@ -595,7 +634,7 @@ class LongCatSingleStreamBlock(nn.Module):
             kv_cache = (kv_cache[0].to(x.device), kv_cache[1].to(x.device))
             attn_outputs = self.attn.forward_with_kv_cache(x_m, shape=latent_shape, num_cond_latents=num_cond_latents, kv_cache=kv_cache)
         else:
-            attn_outputs = self.attn(x_m, shape=latent_shape, num_cond_latents=num_cond_latents, return_kv=return_kv)
+            attn_outputs = self.attn(x_m, shape=latent_shape, num_cond_latents=num_cond_latents, num_end_cond_latents=num_end_cond_latents, return_kv=return_kv)
         
         if return_kv:
             x_s, kv_cache = attn_outputs
@@ -610,7 +649,7 @@ class LongCatSingleStreamBlock(nn.Module):
         if not skip_crs_attn:
             if kv_cache is not None:
                 num_cond_latents = None
-            x = x + self.cross_attn(self.pre_crs_attn_norm(x), y, y_seqlen, num_cond_latents=num_cond_latents, shape=latent_shape)
+            x = x + self.cross_attn(self.pre_crs_attn_norm(x), y, y_seqlen, num_cond_latents=num_cond_latents, num_end_cond_latents=num_end_cond_latents, shape=latent_shape)
 
         # ffn with modulation
         x_m = modulate_fp32(self.mod_norm_ffn, x.view(B, -1, N//T, C), shift_mlp, scale_mlp).view(B, -1, C)
@@ -769,6 +808,7 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
         encoder_hidden_states, 
         encoder_attention_mask=None, 
         num_cond_latents=0,
+        num_end_cond_latents=0,
         return_kv=False, 
         kv_cache_dict={},
         skip_crs_attn=False, 
@@ -788,7 +828,10 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
         # expand the shape of timestep from [B] to [B, T]
         if len(timestep.shape) == 1:
             timestep = timestep.unsqueeze(1).expand(-1, N_t).clone() # [B, T]
+        # Set timestep to 0 for conditioning frames (both start and end)
         timestep[:, :num_cond_latents] = 0
+        if num_end_cond_latents > 0:
+            timestep[:, -num_end_cond_latents:] = 0
 
         dtype = hidden_states.dtype
         hidden_states = hidden_states.to(dtype)
@@ -832,6 +875,7 @@ class LongCatVideoTransformer3DModel(torch.nn.Module):
                 y_seqlen=y_seqlens,
                 latent_shape=(N_t, N_h, N_w),
                 num_cond_latents=num_cond_latents,
+                num_end_cond_latents=num_end_cond_latents,
                 return_kv=return_kv,
                 kv_cache=kv_cache_dict.get(i, None),
                 skip_crs_attn=skip_crs_attn,
