@@ -23,12 +23,12 @@ def analyze_transitions(json_path):
     csv_path = json_path.replace('.json', '_transitions.csv')
     with open(csv_path, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(['video_file', 'transition_start', 'transition_end'])
+        writer.writerow(['video', 'prompt', 'start_frame_index', 'num_frames'])
         for video_name, video_data in data.items():
             transitions = video_data['transitions']
             frame_num = int(video_data.get('frame_num', 0))
             # Filter transitions in valid range
-            valid_transitions = [t for t in transitions if t[0] > 500 and t[1] < frame_num - 500]
+            valid_transitions = [t for t in transitions if t[0] > 500 and t[1] < frame_num - 500 and t[1] - t[0] < 120]
             n = len(valid_transitions)
             if n == 0:
                 continue
@@ -39,7 +39,8 @@ def analyze_transitions(json_path):
                 idxs = [int(i * (n - 1) / 2) for i in range(3)]
                 sampled = [valid_transitions[i] for i in idxs]
             for start, end in sampled:
-                writer.writerow([video_name, start, end])
+                clip_start = ((end + start) // 2) - 180
+                writer.writerow([video_name, "", clip_start, 361])
     print(f"Filtered transitions saved to: {csv_path}")
     
     # Number of videos
