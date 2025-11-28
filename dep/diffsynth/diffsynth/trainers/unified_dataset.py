@@ -115,26 +115,37 @@ class ToList(DataProcessingOperator):
 
 
 class LoadVideo(DataProcessingOperator):
-    def __init__(self, num_frames=81, time_division_factor=4, time_division_remainder=1, frame_processor=lambda x: x):
-        self.num_frames = num_frames
+    def __init__(self, num_frames=81, time_division_factor=4, time_division_remainder=1, frame_processor=lambda x: x, start_frame_index=0):
+        self.default_num_frames = num_frames
         self.time_division_factor = time_division_factor
         self.time_division_remainder = time_division_remainder
         # frame_processor is build in the video loader for high efficiency.
         self.frame_processor = frame_processor
+        self.default_start_frame_index = start_frame_index
         
-    def get_num_frames(self, reader):
-        num_frames = self.num_frames
+    def get_num_frames(self, reader, requested_num_frames=None):
+        num_frames = requested_num_frames if requested_num_frames is not None else self.default_num_frames
         if int(reader.count_frames()) < num_frames:
             num_frames = int(reader.count_frames())
             while num_frames > 1 and num_frames % self.time_division_factor != self.time_division_remainder:
                 num_frames -= 1
         return num_frames
         
-    def __call__(self, data: str):
-        reader = imageio.get_reader(data)
-        num_frames = self.get_num_frames(reader)
+    def __call__(self, data):
+        # Support both string path and dict with path + start_frame_index + num_frames
+        if isinstance(data, dict):
+            video_path = data['path']
+            start_frame_index = data.get('start_frame_index', self.default_start_frame_index)
+            requested_num_frames = data.get('num_frames', None)
+        else:
+            video_path = data
+            start_frame_index = self.default_start_frame_index
+            requested_num_frames = None
+        
+        reader = imageio.get_reader(video_path)
+        num_frames = self.get_num_frames(reader, requested_num_frames)
         frames = []
-        for frame_id in range(num_frames):
+        for frame_id in range(start_frame_index, start_frame_index + num_frames):
             frame = reader.get_data(frame_id)
             frame = Image.fromarray(frame)
             frame = self.frame_processor(frame)
@@ -272,6 +283,7 @@ class UnifiedDataset(torch.utils.data.Dataset):
         max_pixels=1920*1080, height=None, width=None,
         height_division_factor=16, width_division_factor=16,
         num_frames=81, time_division_factor=4, time_division_remainder=1,
+        start_frame_index=0,
     ):
         return RouteByType(operator_map=[
             (str, ToAbsolutePath(base_path) >> RouteByExtensionName(operator_map=[
@@ -283,6 +295,7 @@ class UnifiedDataset(torch.utils.data.Dataset):
                 (("mp4", "avi", "mov", "wmv", "mkv", "flv", "webm"), LoadVideo(
                     num_frames, time_division_factor, time_division_remainder,
                     frame_processor=ImageCropAndResize(height, width, max_pixels, height_division_factor, width_division_factor),
+                    start_frame_index=start_frame_index,
                 )),
             ])),
         ])
@@ -322,10 +335,20 @@ class UnifiedDataset(torch.utils.data.Dataset):
             data = self.data[data_id % len(self.data)].copy()
             for key in self.data_file_keys:
                 if key in data:
+                    # Check if there's a per-item start_frame_index or num_frames
+                    value = data[key]
+                    if key == 'video' and ('start_frame_index' in data or 'num_frames' in data):
+                        # Pass path and optional parameters to the operator
+                        value = {'path': value}
+                        if 'start_frame_index' in data:
+                            value['start_frame_index'] = data['start_frame_index']
+                        if 'num_frames' in data:
+                            value['num_frames'] = data['num_frames']
+                    
                     if key in self.special_operator_map:
-                        data[key] = self.special_operator_map[key](data[key])
+                        data[key] = self.special_operator_map[key](value)
                     elif key in self.data_file_keys:
-                        data[key] = self.main_data_operator(data[key])
+                        data[key] = self.main_data_operator(value)
         return data
 
     def __len__(self):

@@ -1,0 +1,17 @@
+[project]
+name = "deepvidsum"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "diffsynth",
+]
+
+[tool.uv.workspace]
+members = [
+    "dep/diffsynth",
+]
+
+[tool.uv.sources]
+diffsynth = { workspace = true }

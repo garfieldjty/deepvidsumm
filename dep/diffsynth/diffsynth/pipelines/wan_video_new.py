@@ -76,6 +76,7 @@ class WanVideoPipeline(BasePipeline):
             WanVideoUnit_TeaCache(),
             WanVideoUnit_CfgMerger(),
             WanVideoUnit_LongCatVideo(),
+            WanVideoUnit_LongCatVideoInBetween(),
         ]
         self.post_units = [
             WanVideoPostUnit_S2V(),
@@ -482,6 +483,9 @@ class WanVideoPipeline(BasePipeline):
         motion_bucket_id: Optional[int] = None,
         # LongCat-Video
         longcat_video: Optional[list[Image.Image]] = None,
+        # LongCat-Video In-Between
+        longcat_start_video: Optional[list[Image.Image]] = None,
+        longcat_end_video: Optional[list[Image.Image]] = None,
         # VAE tiling
         tiled: Optional[bool] = True,
         tile_size: Optional[tuple[int, int]] = (30, 52),
@@ -522,6 +526,7 @@ class WanVideoPipeline(BasePipeline):
             "sigma_shift": sigma_shift,
             "motion_bucket_id": motion_bucket_id,
             "longcat_video": longcat_video,
+            "longcat_start_video": longcat_start_video, "longcat_end_video": longcat_end_video,
             "tiled": tiled, "tile_size": tile_size, "tile_stride": tile_stride,
             "sliding_window_size": sliding_window_size, "sliding_window_stride": sliding_window_stride,
             "input_audio": input_audio, "audio_sample_rate": audio_sample_rate, "s2v_pose_video": s2v_pose_video, "audio_embeds": audio_embeds, "s2v_pose_latents": s2v_pose_latents, "motion_video": motion_video,
@@ -1251,6 +1256,32 @@ class WanVideoUnit_LongCatVideo(PipelineUnit):
         return {"longcat_latents": longcat_latents}
 
 
+class WanVideoUnit_LongCatVideoInBetween(PipelineUnit):
+    def __init__(self):
+        super().__init__(
+            input_params=("longcat_start_video", "longcat_end_video"),
+            onload_model_names=("vae",)
+        )
+
+    def process(self, pipe: WanVideoPipeline, longcat_start_video, longcat_end_video):
+        result = {}
+        pipe.load_models_to_device(self.onload_model_names)
+        
+        # Process starting frames
+        if longcat_start_video is not None:
+            longcat_start_video = pipe.preprocess_video(longcat_start_video)
+            longcat_start_latents = pipe.vae.encode(longcat_start_video, device=pipe.device).to(dtype=pipe.torch_dtype, device=pipe.device)
+            result["longcat_start_latents"] = longcat_start_latents
+        
+        # Process ending frames
+        if longcat_end_video is not None:
+            longcat_end_video = pipe.preprocess_video(longcat_end_video)
+            longcat_end_latents = pipe.vae.encode(longcat_end_video, device=pipe.device).to(dtype=pipe.torch_dtype, device=pipe.device)
+            result["longcat_end_latents"] = longcat_end_latents
+        
+        return result
+
+
 class TeaCache:
     def __init__(self, num_inference_steps, rel_l1_thresh, model_id):
         self.num_inference_steps = num_inference_steps
@@ -1640,6 +1671,65 @@ def model_fn_longcat_video(
         num_cond_latents = longcat_latents.shape[2]
     else:
         num_cond_latents = 0
+    context = context.unsqueeze(0)
+    encoder_attention_mask = torch.any(context != 0, dim=-1)[:, 0].to(torch.int64)
+    output = dit(
+        latents,
+        timestep,
+        context,
+        encoder_attention_mask,
+        num_cond_latents=num_cond_latents,
+        use_gradient_checkpointing=use_gradient_checkpointing,
+        use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+    )
+    output = -output
+    output = output.to(latents.dtype)
+    return output
+
+
+def model_fn_longcat_video_inbetween(
+    dit: LongCatVideoTransformer3DModel,
+    latents: torch.Tensor = None,
+    timestep: torch.Tensor = None,
+    context: torch.Tensor = None,
+    longcat_start_latents: torch.Tensor = None,
+    longcat_end_latents: torch.Tensor = None,
+    use_gradient_checkpointing=False,
+    use_gradient_checkpointing_offload=False,
+):
+    """
+    Model function for LongCat video in-between task.
+    This function conditions on both starting and ending frames for video interpolation.
+    
+    Args:
+        dit: LongCat DiT model
+        latents: Full video latents [B, C, T, H, W]
+        timestep: Timestep for diffusion
+        context: Text context embeddings
+        longcat_start_latents: Starting frame latents for conditioning [B, C, T_start, H, W]
+        longcat_end_latents: Ending frame latents for conditioning [B, C, T_end, H, W]
+        use_gradient_checkpointing: Whether to use gradient checkpointing
+        use_gradient_checkpointing_offload: Whether to offload gradient checkpointing
+    
+    Returns:
+        Model output (noise prediction)
+    """
+    num_cond_latents = 0
+    
+    # Set starting frames as conditional
+    if longcat_start_latents is not None:
+        num_start_frames = longcat_start_latents.shape[2]
+        latents[:, :, :num_start_frames] = longcat_start_latents
+        num_cond_latents += num_start_frames
+    
+    # Set ending frames as conditional
+    if longcat_end_latents is not None:
+        num_end_frames = longcat_end_latents.shape[2]
+        latents[:, :, -num_end_frames:] = longcat_end_latents
+        # Note: For the in-between task, we only count start frames in num_cond_latents
+        # The end frames are handled separately by fixing them in place
+        # The model will learn to interpolate between the fixed start and end frames
+    
     context = context.unsqueeze(0)
     encoder_attention_mask = torch.any(context != 0, dim=-1)[:, 0].to(torch.int64)
     output = dit(
