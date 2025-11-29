@@ -30,11 +30,10 @@ class GradioGUI(GUIBase):
             return None, f"Error while processing: {exc}"
 
     def launch(self):
-        with gr.Blocks(title="deepvidsumm") as demo:
+        with gr.Blocks(title="DeepVidSumm") as demo:
             gr.Markdown(
-                "## deepvidsumm\n"
+                "## DeepVidSumm\n"
                 "Upload a video, enter a prompt, and get a short answer-focused clip.\n"
-                "If an OpenRouter API key is available, the vision model will be used; otherwise a mock heuristic runs."
             )
             with gr.Row():
                 prompt = gr.Textbox(label="Prompt", placeholder="e.g., When does Mr. Sloth speak?", lines=2)
