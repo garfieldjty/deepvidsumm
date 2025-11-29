@@ -28,19 +28,14 @@ def analyze_transitions(json_path):
             transitions = video_data['transitions']
             frame_num = int(video_data.get('frame_num', 0))
             # Filter transitions in valid range
-            valid_transitions = [t for t in transitions if t[0] > 500 and t[1] < frame_num - 500 and t[1] - t[0] < 120]
+            valid_transitions = [t for t in transitions if t[0] > 500 and t[1] < frame_num - 500 and t[1] - t[0] < 40]
             n = len(valid_transitions)
             if n == 0:
                 continue
-            if n <= 3:
-                sampled = valid_transitions
-            else:
-                # Evenly sample 3 transitions
-                idxs = [int(i * (n - 1) / 2) for i in range(3)]
-                sampled = [valid_transitions[i] for i in idxs]
-            for start, end in sampled:
-                clip_start = ((end + start) // 2) - 180
-                writer.writerow([video_name, "", clip_start, 361])
+            sampled = valid_transitions[0]
+            start, end = sampled
+            clip_start = ((end + start) // 2) - 60
+            writer.writerow([video_name, "", clip_start, 121])
     print(f"Filtered transitions saved to: {csv_path}")
     
     # Number of videos
@@ -75,11 +70,17 @@ def analyze_transitions(json_path):
     print(f"Std dev: {statistics.stdev(transitions_per_video):.2f}")
     print()
     
-    print("Histogram (number of transitions -> count of videos):")
-    for num_trans in sorted(transitions_counter.keys()):
-        count = transitions_counter[num_trans]
-        bar = "█" * (count // max(1, num_videos // 50))  # Scale bars
-        print(f"  {num_trans:3d} transitions: {count:4d} videos {bar}")
+    # Histogram of transitions per video (binned)
+    print("Histogram (number of transitions ranges -> count of videos):")
+    trans_bins = [0, 1, 2, 3, 5, 10, 20, 50, 100, float('inf')]
+    trans_labels = ["0", "1", "2", "3-4", "5-9", "10-19", "20-49", "50-99", "100+"]
+    for i in range(len(trans_bins) - 1):
+        lower = trans_bins[i]
+        upper = trans_bins[i + 1]
+        count = sum(1 for t in transitions_per_video if lower <= t < upper)
+        percentage = (count / num_videos) * 100
+        bar = "█" * int(percentage)
+        print(f"  {trans_labels[i]:>7s} transitions: {count:4d} ({percentage:5.2f}%) {bar}")
     print()
     
     # Distribution of transition gaps
@@ -115,5 +116,5 @@ def analyze_transitions(json_path):
 
 
 if __name__ == "__main__":
-    json_path = "/home/tjiao/cv_proj/dep/clipshots/annotations/train.json"
+    json_path = "/workspace/deepvidsumm/dep/clipshots/annotations/train.json"
     analyze_transitions(json_path)

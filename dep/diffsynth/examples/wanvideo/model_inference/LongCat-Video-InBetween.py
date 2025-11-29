@@ -2,6 +2,8 @@ import torch
 from diffsynth import save_video, VideoData
 from diffsynth.pipelines.wan_video_new import WanVideoPipeline, ModelConfig, model_fn_longcat_video_inbetween
 
+# TheMostSHOCKINGPsychiatryDocumentaryEVERmkv.mp4,,532,121
+
 
 # Load the pipeline
 pipe = WanVideoPipeline.from_pretrained(
@@ -18,7 +20,7 @@ pipe.enable_vram_management()
 # Load the trained LoRA weights (optional - comment out if using base model only)
 pipe.load_lora(
     pipe.dit,
-    lora_config="./models/train/LongCat-Video-InBetween_lora/epoch-4.safetensors",
+    lora_config="./models/train/LongCat-Video-InBetween_lora/epoch-0.safetensors",
     alpha=1.0,
 )
 
@@ -28,19 +30,19 @@ pipe.model_fn = model_fn_longcat_video_inbetween
 # Load input video
 print("Loading input video...")
 input_video = VideoData(
-    video_file="/workspace/deepvidsumm/dep/diffsynth/data/between/4001498009.mp4",
+    video_file="/workspace/deepvidsumm/dep/clipshots/videos/ClipShots/videos/train/TheMostSHOCKINGPsychiatryDocumentaryEVERmkv.mp4",
     height=480,
     width=832,
 )
     
 # Extract start and end frames (121 frames each, must satisfy (num_frames-1) % 4 == 0)
-num_start_frames = 171
-num_end_frames = 171
-total_frames = 361
+num_start_frames = 40
+num_end_frames = 40
+total_frames = 121
 
 
-# Get frames from the video (starting from frame 38)
-all_frames = [input_video[i] for i in range(38, 38 + total_frames)]
+# Get frames from the video (starting from frame 532)
+all_frames = [input_video[i] for i in range(532, 532 + total_frames)]
 longcat_start_video = all_frames[:num_start_frames]
 longcat_end_video = all_frames[-num_end_frames:]
 
