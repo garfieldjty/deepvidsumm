@@ -5,6 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from tqdm.auto import tqdm
+from lion_pytorch import Lion
 
 from .utils_latents import retrieve_latents
 from .models import load_wan_components, add_lora_to_transformer
@@ -57,7 +58,8 @@ class InbetweenTrainer:
             self.transformer,
             cfg.lora_r,
             cfg.lora_alpha,
-            cfg.lora_dropout
+            cfg.lora_dropout,
+            cfg.num_train_steps,
         )
 
         # Freeze all except LoRA
@@ -65,7 +67,7 @@ class InbetweenTrainer:
             p.requires_grad = ("lora_" in name)
 
         params = [p for p in self.transformer.parameters() if p.requires_grad]
-        self.optim = torch.optim.AdamW(params, lr=cfg.learning_rate)
+        self.optim = Lion(params, lr=cfg.learning_rate, weight_decay=0.01)
 
         # Dataset
         dataset = InbetweenVideoDataset(

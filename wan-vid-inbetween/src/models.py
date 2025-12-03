@@ -5,7 +5,7 @@ from diffusers import (
     AutoencoderKLWan,
     FlowMatchEulerDiscreteScheduler,
 )
-from peft import LoraConfig, get_peft_model
+from peft import AdaLoraConfig, get_peft_model
 
 try:
     # Newer PEFT: has TaskType enum
@@ -40,7 +40,7 @@ def load_wan_components(
     return vae, transformer, scheduler
 
 
-def add_lora_to_transformer(transformer, r, alpha, dropout):
+def add_lora_to_transformer(transformer, r, alpha, dropout, total_steps):
     """
     Attach LoRA adapters to Wan transformer:
 
@@ -67,11 +67,18 @@ def add_lora_to_transformer(transformer, r, alpha, dropout):
         "ffn.net.2",       # FFN output projection
     ]
 
-    config = LoraConfig(
+    config = AdaLoraConfig(
         r=r,
         lora_alpha=alpha,
         target_modules=target_modules,
         lora_dropout=dropout,
         bias="none",
+        init_r=r,
+        target_r=8,
+        tinit=200,
+        tfinal=8000,
+        deltaT=10,
+        orth_reg_weight=0.5,
+        total_step=total_steps,
     )
     return get_peft_model(transformer, config)
