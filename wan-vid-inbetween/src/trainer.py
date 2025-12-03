@@ -88,6 +88,9 @@ class InbetweenTrainer:
             self.vae, self.transformer, self.optim, self.dl
         )
 
+        # Move scheduler timesteps to device for efficient indexing during training
+        self.scheduler.timesteps = self.scheduler.timesteps.to(self.acc.device)
+
     # ------------------------------------------------------------
     # TRAINING STEP (mask-based [start, mid, end] conditioning)
     # ------------------------------------------------------------
@@ -140,10 +143,16 @@ class InbetweenTrainer:
 
                     # Noise & timestep (only for mid)
                     noise = torch.randn_like(mid_lat)
-                    t = torch.randint(
+                    
+                    # Sample random indices into the scheduler's training timesteps
+                    t_idx = torch.randint(
                         0, self.scheduler.config.num_train_timesteps, (B,), device=device
                     )
-
+                    
+                    # FlowMatch expects continuous timesteps from scheduler.timesteps
+                    t = self.scheduler.timesteps[t_idx].to(dtype=mid_lat.dtype)
+                    
+                    # Forward (flow-matching forward process)
                     noisy_mid = self.scheduler.scale_noise(mid_lat, t, noise)
 
                     # Build transformer input: [start, noisy_mid, end]
@@ -175,7 +184,9 @@ class InbetweenTrainer:
 
                     # Only supervise mid region
                     pred_mid = pred[:, :, s:s+m]
-                    loss = torch.nn.functional.mse_loss(pred_mid.float(), noise.float())
+                    # Flow matching target: velocity field (noise - x_0)
+                    target = noise - mid_lat
+                    loss = torch.nn.functional.mse_loss(pred_mid.float(), target.float())
 
                     self.acc.backward(loss)
                     self.optim.step()
