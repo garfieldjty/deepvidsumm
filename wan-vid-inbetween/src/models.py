@@ -44,7 +44,8 @@ def add_lora_to_transformer(transformer, r, alpha, dropout):
     """
     Attach LoRA adapters to Wan transformer:
 
-    - Attention projections: to_q / to_k / to_v
+    - Attention projections: to_q / to_k / to_v / to_out.0
+    - Cross-attention projections: add_k_proj / add_v_proj (if present)
     - FeedForward MLP linears inside `ffn`:
         * ffn.net.0.proj  (GELU block's linear)
         * ffn.net.2       (output linear)
@@ -53,13 +54,17 @@ def add_lora_to_transformer(transformer, r, alpha, dropout):
     strings are chosen to be specific enough for the Wan blocks.
     """
     target_modules = [
-        # self-attention / cross-attention
+        # Self-attention projections
         "to_q",
         "to_k",
         "to_v",
-        # feed-forward inner linears
-        "ffn.net.0.proj",
-        "ffn.net.2",
+        "to_out.0",  # Attention output projection
+        # Cross-attention projections (for conditioning)
+        "add_k_proj",
+        "add_v_proj",
+        # Feed-forward layers
+        "ffn.net.0.proj",  # FFN input projection
+        "ffn.net.2",       # FFN output projection
     ]
 
     config = LoraConfig(

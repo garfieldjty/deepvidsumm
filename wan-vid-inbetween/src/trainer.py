@@ -82,14 +82,23 @@ class InbetweenTrainer:
             cut_focus_prob=cfg.cut_focus_prob,
         )
 
-        self.dl = DataLoader(dataset, batch_size=cfg.train_batch_size, shuffle=True)
+        self.dl = DataLoader(
+            dataset, 
+            batch_size=cfg.train_batch_size, 
+            shuffle=True,
+            num_workers=4,  # Parallel data loading
+            pin_memory=True,  # Faster CPU->GPU transfer
+            prefetch_factor=2,  # Prefetch batches
+            persistent_workers=True  # Keep workers alive
+        )
 
         self.vae, self.transformer, self.optim, self.dl = self.acc.prepare(
             self.vae, self.transformer, self.optim, self.dl
         )
 
-        # Move scheduler timesteps to device for efficient indexing during training
-        self.scheduler.timesteps = self.scheduler.timesteps.to(self.acc.device)
+        # Pre-compute latent normalization tensors (avoid recreating every step)
+        self.latents_mean = None
+        self.latents_std = None
 
     # ------------------------------------------------------------
     # TRAINING STEP (mask-based [start, mid, end] conditioning)
@@ -107,7 +116,7 @@ class InbetweenTrainer:
                 with self.acc.accumulate(self.transformer):
 
                     # Video: [B, T, C, H, W] -> [B, C, T, H, W]
-                    video = batch["video"].to(device)
+                    video = batch["video"].to(device, non_blocking=True)
                     video = video.permute(0, 2, 1, 3, 4)
 
                     # Encode via VAE
@@ -116,18 +125,19 @@ class InbetweenTrainer:
                         latents = retrieve_latents(enc)  # [B, C, T_lat, H_lat, W_lat]
                         latents = latents.to(self.transformer.dtype)
 
-                        # Normalize latents using Wan's config (same as inference)
-                        latents_mean = torch.tensor(
-                            self.vae.config.latents_mean,
-                            device=latents.device,
-                            dtype=latents.dtype,
-                        ).view(1, self.vae.config.z_dim, 1, 1, 1)
-                        latents_std = 1.0 / torch.tensor(
-                            self.vae.config.latents_std,
-                            device=latents.device,
-                            dtype=latents.dtype,
-                        ).view(1, self.vae.config.z_dim, 1, 1, 1)
-                        latents = (latents - latents_mean) * latents_std
+                        # Normalize latents using Wan's config (cached for efficiency)
+                        if self.latents_mean is None:
+                            self.latents_mean = torch.tensor(
+                                self.vae.config.latents_mean,
+                                device=latents.device,
+                                dtype=latents.dtype,
+                            ).view(1, self.vae.config.z_dim, 1, 1, 1)
+                            self.latents_std = 1.0 / torch.tensor(
+                                self.vae.config.latents_std,
+                                device=latents.device,
+                                dtype=latents.dtype,
+                            ).view(1, self.vae.config.z_dim, 1, 1, 1)
+                        latents = (latents - self.latents_mean) * self.latents_std
 
                     # Split into start/mid/end (proportional in latent time)
                     B, C, T_lat, H, W = latents.shape
@@ -144,16 +154,14 @@ class InbetweenTrainer:
                     # Noise & timestep (only for mid)
                     noise = torch.randn_like(mid_lat)
                     
-                    # Sample random indices into the scheduler's training timesteps
-                    t_idx = torch.randint(
-                        0, self.scheduler.config.num_train_timesteps, (B,), device=device
-                    )
+                    # Sample random timesteps for flow matching training
+                    # Use continuous timesteps in [0, 1000] range to match scheduler convention
+                    t = torch.rand(B, device=device) * self.scheduler.config.num_train_timesteps
                     
-                    # FlowMatch expects continuous timesteps from scheduler.timesteps
-                    t = self.scheduler.timesteps[t_idx].to(dtype=mid_lat.dtype)
-                    
-                    # Forward (flow-matching forward process)
-                    noisy_mid = self.scheduler.scale_noise(mid_lat, t, noise)
+                    # Flow matching interpolation: x_t = (1 - t/T) * x_0 + (t/T) * noise
+                    # where T = num_train_timesteps (typically 1000)
+                    t_normalized = t.view(B, 1, 1, 1, 1) / self.scheduler.config.num_train_timesteps
+                    noisy_mid = (1 - t_normalized) * mid_lat + t_normalized * noise
 
                     # Build transformer input: [start, noisy_mid, end]
                     latents_in = latents.clone()
