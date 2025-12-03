@@ -1,0 +1,1 @@
+"""Wan video inbetweening package."""

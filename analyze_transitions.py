@@ -18,25 +18,32 @@ def analyze_transitions(json_path):
     with open(json_path, 'r') as f:
         data = json.load(f)
 
-    # Export filtered transitions to CSV
-    import csv
-    csv_path = json_path.replace('.json', '_transitions.csv')
-    with open(csv_path, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(['video', 'prompt', 'start_frame_index', 'num_frames'])
-        for video_name, video_data in data.items():
-            transitions = video_data['transitions']
-            frame_num = int(video_data.get('frame_num', 0))
-            # Filter transitions in valid range
-            valid_transitions = [t for t in transitions if t[0] > 500 and t[1] < frame_num - 500 and t[1] - t[0] < 40]
-            n = len(valid_transitions)
-            if n == 0:
-                continue
-            sampled = valid_transitions[0]
-            start, end = sampled
-            clip_start = ((end + start) // 2) - 60
-            writer.writerow([video_name, "", clip_start, 121])
-    print(f"Filtered transitions saved to: {csv_path}")
+    # Export filtered transitions to JSON with middle frame numbers
+    import json as json_module
+    json_output_path = json_path.replace('.json', '_middle_frames.json')
+    middle_frames_data = {}
+    
+    for video_name, video_data in data.items():
+        transitions = video_data['transitions']
+        frame_num = int(video_data.get('frame_num', 0))
+        # Filter transitions in valid range
+        valid_transitions = [t for t in transitions if t[0] > 120 and t[1] < frame_num - 120 and t[1] - t[0] < 60]
+        
+        # Calculate middle frame for each valid transition
+        middle_frames = []
+        for start, end in valid_transitions:
+            middle_frame = (start + end) // 2
+            middle_frames.append(middle_frame)
+        
+        if middle_frames:  # Only add videos that have valid transitions
+            middle_frames_data[video_name] = middle_frames
+    
+    # Write JSON file
+    with open(json_output_path, 'w') as jsonfile:
+        json_module.dump(middle_frames_data, jsonfile, indent=2)
+    
+    print(f"Middle frames JSON saved to: {json_output_path}")
+    print(f"Total videos with valid transitions: {len(middle_frames_data)}")
     
     # Number of videos
     num_videos = len(data)
@@ -116,5 +123,5 @@ def analyze_transitions(json_path):
 
 
 if __name__ == "__main__":
-    json_path = "/workspace/deepvidsumm/dep/clipshots/annotations/train.json"
+    json_path = "/root/deepvidsumm/dep/clipshots/annotations/train.json"
     analyze_transitions(json_path)

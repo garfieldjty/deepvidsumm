@@ -1,0 +1,65 @@
+# ============================
+# Wan2.2 LoRA Inbetweening Config
+# ============================
+
+# -------- Model --------
+base_model_path: "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+
+# Precision:
+# - transformer_precision: "bf16" or "fp16" or "no"
+# - vae_precision: "fp32" (recommended) or "fp16"
+transformer_precision: "bf16"
+vae_precision: "fp32"
+
+# -------- Data --------
+data_root: "/root/deepvidsumm/dep/clipshots/videos/ClipShots/videos/train"
+video_glob: "**/*.mp4"        # glob under data_root
+
+# Number of raw frames per training sample (before VAE downsampling)
+clip_num_frames: 120          # for 30 + 60 + 30
+
+resolution:
+  height: 384                 # training resolution (must be divisible by 16)
+  width: 672
+
+# Inbetween split in raw frame counts (used proportionally in latent space)
+start_frames: 30
+mid_frames: 60
+end_frames: 30
+
+# Hard-cut annotations (JSON: { "video_name.mp4": [cut_idx1, cut_idx2, ...], ... })
+cut_annotations_path: "./data/train_middle_frames.json"
+
+# If true, the dataset tries to sample windows centered around annotated cuts
+use_cut_focused_sampling: true
+
+# Probability that a given sample is cut-focused; otherwise random window
+cut_focus_prob: 0.7
+
+
+# -------- Training --------
+train_batch_size: 1
+gradient_accumulation_steps: 4
+
+num_train_steps: 20000
+learning_rate: 1.0e-4
+seed: 42
+
+output_dir: "./outputs/inbetween_lora"
+
+# LoRA config
+lora_r: 64
+lora_alpha: 128
+lora_dropout: 0.0
+
+
+# -------- Inference Defaults (for convenience) --------
+inference:
+  height: 480            # higher than training res is OK (must be divisible by 16)
+  width: 832
+  start_frames: 30
+  mid_frames: 60
+  end_frames: 30
+  num_inference_steps: 50
+  out_fps: 24
+  output_path: "./outputs/inbetween_output.mp4"
