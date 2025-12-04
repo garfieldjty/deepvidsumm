@@ -93,7 +93,7 @@ class InbetweenTrainer:
             p.requires_grad = ("lora_" in name)
 
         params = [p for p in self.transformer.parameters() if p.requires_grad]
-        self.optim = Lion(params, lr=cfg.learning_rate, weight_decay=0.01)
+        self.optim = Lion(params, lr=cfg.learning_rate, weight_decay=1e-3)
 
         # Dataset
         dataset = InbetweenVideoDataset(

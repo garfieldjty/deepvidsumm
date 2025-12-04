@@ -95,11 +95,10 @@ def add_lora_to_transformer(transformer, r, alpha, dropout, total_steps):
         lora_dropout=dropout,
         bias="none",
         init_r=r,
-        # target_r=8,
-        # tinit=200,
-        # tfinal=8000,
-        # deltaT=10,
-        # orth_reg_weight=0.5,
+        target_r=r//4,
+        tinit=int(total_steps * 0.1),
+        tfinal=int(total_steps * 0.2),
+        deltaT=int(total_steps * 0.1),
         total_step=total_steps,
     )
     return get_peft_model(transformer, config)
