@@ -44,6 +44,30 @@ def analyze_transitions(json_path):
     
     print(f"Middle frames JSON saved to: {json_output_path}")
     print(f"Total videos with valid transitions: {len(middle_frames_data)}")
+    # Export filtered transitions to CSV
+    import csv
+    csv_path = json_path.replace('.json', '_transitions.csv')
+    with open(csv_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['video', 'prompt', 'start_frame_index', 'num_frames'])
+        for video_name, video_data in data.items():
+            transitions = video_data['transitions']
+            frame_num = int(video_data.get('frame_num', 0))
+            # Filter transitions in valid range
+            valid_transitions = [t for t in transitions if t[0] > 60 and t[1] < frame_num - 60 and t[1] - t[0] < 40]
+            n = len(valid_transitions)
+            if n == 0:
+                continue
+            if n <= 3:
+                sampled = valid_transitions
+            else:
+                # Evenly sample 3 transitions
+                idxs = [int(i * (n - 1) / 2) for i in range(3)]
+                sampled = [valid_transitions[i] for i in idxs]
+            for start, end in sampled:
+                clip_start = ((end + start) // 2) - 60
+                writer.writerow([video_name, "", clip_start, 121])
+    print(f"Filtered transitions saved to: {csv_path}")
     
     # Number of videos
     num_videos = len(data)
@@ -123,5 +147,5 @@ def analyze_transitions(json_path):
 
 
 if __name__ == "__main__":
-    json_path = "/root/deepvidsumm/dep/clipshots/annotations/train.json"
+    json_path = "/home/tjiao/cv_proj/dep/clipshots/annotations/train.json"
     analyze_transitions(json_path)

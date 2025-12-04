@@ -18,7 +18,7 @@ vae_precision: "fp32"
 attn_implementation: "sdpa"
 
 # -------- Data --------
-data_root: "/root/deepvidsumm/dep/clipshots/videos/ClipShots/videos/train"
+data_root: "/home/tjiao/cv_proj/dep/clipshots/videos/ClipShots_extracted/ClipShots/videos/train"
 video_glob: "**/*.mp4"        # glob under data_root
 
 # Number of raw frames per training sample (before VAE downsampling)
@@ -34,7 +34,7 @@ mid_frames: 60
 end_frames: 30
 
 # Hard-cut annotations (JSON: { "video_name.mp4": [cut_idx1, cut_idx2, ...], ... })
-cut_annotations_path: "./data/train_middle_frames.json"
+cut_annotations_path: "/home/tjiao/cv_proj/dep/clipshots/annotations/train_middle_frames.json"
 
 # If true, the dataset tries to sample windows centered around annotated cuts
 use_cut_focused_sampling: true
