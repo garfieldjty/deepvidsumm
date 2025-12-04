@@ -14,17 +14,18 @@ from torch.utils.data import Dataset
 # Video Loading Helpers
 # ----------------------------
 
-def read_video_frames(path: str, num_frames: int, start_index: Optional[int] = None) -> List[np.ndarray]:
+def read_video_frames(path: str, num_frames: int, start_index: Optional[int] = None) -> Optional[List[np.ndarray]]:
     """
     Read num_frames RGB frames starting from start_index.
     Pads by repeating the last frame if not enough frames available.
+    Returns None if video has zero frames (to skip corrupted videos).
     """
     cap = cv2.VideoCapture(path)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     if total <= 0:
         cap.release()
-        raise ValueError(f"Video {path} has zero frames.")
+        return None  # Skip corrupted videos
 
     # Determine start index
     if start_index is None:
@@ -145,11 +146,15 @@ class InbetweenVideoDataset(Dataset):
         start_idx = max(0, start_idx)
 
         frames = read_video_frames(str(path), self.clip_num_frames, start_index=start_idx)
+        if frames is None:
+            return None  # Video is corrupted
         frames = resize_frames(frames, self.height, self.width)
         return frames
 
-    def _sample_random_clip(self, path: Path) -> List[np.ndarray]:
+    def _sample_random_clip(self, path: Path) -> Optional[List[np.ndarray]]:
         frames = read_video_frames(str(path), self.clip_num_frames)
+        if frames is None:
+            return None  # Video is corrupted
         frames = resize_frames(frames, self.height, self.width)
         return frames
 
@@ -160,29 +165,49 @@ class InbetweenVideoDataset(Dataset):
         return len(self.paths)
 
     def __getitem__(self, idx: int):
-        vid_path = self.paths[idx]
+        max_retries = 100  # Prevent infinite loops if all videos are corrupted
+        tried_indices = set()
+        
+        for attempt in range(max_retries):
+            current_idx = idx if attempt == 0 else np.random.randint(0, len(self))
+            
+            # Skip if we've already tried this index
+            if current_idx in tried_indices:
+                continue
+            tried_indices.add(current_idx)
+            
+            vid_path = self.paths[current_idx]
 
-        # Decide sampling strategy
-        use_cut = (
-            self.use_cut_focused_sampling and
-            (self.cut_annotations is not None) and
-            (self._get_video_key(vid_path) in self.cut_annotations) and
-            (np.random.rand() < self.cut_focus_prob)
-        )
+            # Decide sampling strategy
+            use_cut = (
+                self.use_cut_focused_sampling and
+                (self.cut_annotations is not None) and
+                (self._get_video_key(vid_path) in self.cut_annotations) and
+                (np.random.rand() < self.cut_focus_prob)
+            )
 
-        if use_cut:
-            frames = self._sample_clip_round_cut(vid_path)
-            if frames is None:
+            if use_cut:
+                frames = self._sample_clip_round_cut(vid_path)
+                if frames is None:
+                    frames = self._sample_random_clip(vid_path)
+            else:
                 frames = self._sample_random_clip(vid_path)
-        else:
-            frames = self._sample_random_clip(vid_path)
 
-        # Convert to tensor [T, C, H, W]
-        video_np = np.stack(frames, axis=0).astype(np.float32) / 255.0
-        video_np = np.transpose(video_np, (0, 3, 1, 2))
-        video = torch.from_numpy(video_np)
+            # If valid frames found, return them
+            if frames is not None:
+                # Convert to tensor [T, C, H, W]
+                video_np = np.stack(frames, axis=0).astype(np.float32) / 255.0
+                video_np = np.transpose(video_np, (0, 3, 1, 2))
+                video = torch.from_numpy(video_np)
 
-        return {
-            "video": video,    # [T, 3, H, W]
-            "path": str(vid_path),
-        }
+                return {
+                    "video": video,    # [T, 3, H, W]
+                    "path": str(vid_path),
+                }
+            
+            # If corrupted, log and continue to next attempt
+            import warnings
+            warnings.warn(f"Skipping corrupted video (attempt {attempt+1}/{max_retries}): {vid_path}")
+        
+        # If all retries exhausted, raise error
+        raise RuntimeError(f"Failed to load a valid video after {max_retries} attempts. Dataset may be corrupted.")
