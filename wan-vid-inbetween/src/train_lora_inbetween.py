@@ -14,9 +14,19 @@ def main():
         default="config/default_inbetween_config.yaml",
         help="Path to YAML config file",
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Resume from checkpoint. Use 'latest' for most recent, or provide path.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    
+    # Override resume_from_checkpoint if provided via CLI
+    if args.resume:
+        cfg["resume_from_checkpoint"] = args.resume
 
     # Map YAML -> TrainConfig
     train_cfg = TrainConfig(
@@ -43,6 +53,14 @@ def main():
         lora_dropout=cfg.get("lora_dropout", 0.0),
         transformer_precision=cfg.get("transformer_precision", "bf16"),
         vae_precision=cfg.get("vae_precision", "fp32"),
+        # Performance
+        attn_implementation=cfg.get("attn_implementation", "sdpa"),
+        # Logging
+        log_dir=cfg.get("log_dir", "./logs"),
+        log_every_n_steps=cfg.get("log_every_n_steps", 10),
+        # Checkpointing
+        save_every_n_steps=cfg.get("save_every_n_steps", 1000),
+        resume_from_checkpoint=cfg.get("resume_from_checkpoint", None),
     )
 
     trainer = InbetweenTrainer(train_cfg)

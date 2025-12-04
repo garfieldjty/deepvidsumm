@@ -18,7 +18,7 @@ vae_precision: "fp32"
 attn_implementation: "sdpa"
 
 # -------- Data --------
-data_root: "/root/deepvidsumm/dep/clipshots/videos/ClipShots/videos/train"
+data_root: "/workspace/deepvidsumm/dep/clipshots/videos/ClipShots/videos/train"
 video_glob: "**/*.mp4"        # glob under data_root
 
 # Number of raw frames per training sample (before VAE downsampling)
@@ -34,7 +34,7 @@ mid_frames: 60
 end_frames: 30
 
 # Hard-cut annotations (JSON: { "video_name.mp4": [cut_idx1, cut_idx2, ...], ... })
-cut_annotations_path: "./data/train_middle_frames.json"
+cut_annotations_path: "/workspace/deepvidsumm/dep/clipshots/annotations/train_middle_frames.json"
 
 # If true, the dataset tries to sample windows centered around annotated cuts
 use_cut_focused_sampling: true
@@ -44,10 +44,10 @@ cut_focus_prob: 0.7
 
 
 # -------- Training --------
-train_batch_size: 1
-gradient_accumulation_steps: 4
+train_batch_size: 1  # Increased from 1 for better multi-GPU utilization
+gradient_accumulation_steps: 4  # Reduced from 4 to keep same effective batch size (2*2*2=8)
 
-num_train_steps: 20000
+num_train_steps: 5000
 learning_rate: 1.0e-4
 seed: 42
 

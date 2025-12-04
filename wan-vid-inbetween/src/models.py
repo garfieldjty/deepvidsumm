@@ -22,16 +22,37 @@ def load_wan_components(
     base_model_path: str,
     transformer_precision: str = "bf16",
     vae_precision: str = "fp32",
+    attn_implementation: str = "sdpa",
 ):
+    """Load Wan model components with configurable attention implementation.
+    
+    Args:
+        attn_implementation: "flash_attention_2" (fastest, requires flash-attn package),
+                           "sdpa" (PyTorch native, good speed),
+                           "eager" (slowest, most compatible)
+    """
     dtype_t = torch.bfloat16 if transformer_precision == "bf16" else torch.float16
     dtype_vae = torch.float32 if vae_precision == "fp32" else torch.float16
 
     vae = AutoencoderKLWan.from_pretrained(
         base_model_path, subfolder="vae", torch_dtype=dtype_vae
     )
-    transformer = WanTransformer3DModel.from_pretrained(
-        base_model_path, subfolder="transformer", torch_dtype=dtype_t
-    )
+    
+    # Load transformer with specified attention implementation
+    try:
+        transformer = WanTransformer3DModel.from_pretrained(
+            base_model_path, 
+            subfolder="transformer", 
+            torch_dtype=dtype_t,
+            attn_implementation=attn_implementation
+        )
+        print(f"✓ Loaded transformer with attention: {attn_implementation}")
+    except Exception as e:
+        print(f"⚠ Failed to load with {attn_implementation}: {e}")
+        print(f"  Falling back to default attention implementation")
+        transformer = WanTransformer3DModel.from_pretrained(
+            base_model_path, subfolder="transformer", torch_dtype=dtype_t
+        )
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         base_model_path, subfolder="scheduler"
     )
