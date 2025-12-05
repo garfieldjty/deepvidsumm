@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "diffsynth",
+    "wan-vid-inbetween",
 ]
 
 [tool.uv.workspace]
@@ -16,3 +17,4 @@ members = [
 
 [tool.uv.sources]
 diffsynth = { workspace = true }
+wan-vid-inbetween = { workspace = true }

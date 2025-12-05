@@ -40,30 +40,30 @@ cut_annotations_path: "/home/tjiao/cv_proj/dep/clipshots/annotations/train_middl
 use_cut_focused_sampling: true
 
 # Probability that a given sample is cut-focused; otherwise random window
-cut_focus_prob: 0.7
+cut_focus_prob: 0.9
 
 
 # -------- Training --------
 train_batch_size: 1
-gradient_accumulation_steps: 4
+gradient_accumulation_steps: 32
 
-num_train_steps: 20000
+num_train_steps: 10000
 learning_rate: 1.0e-4
-seed: 42
+seed: 68
 
 output_dir: "./outputs/inbetween_lora"
 
 # LoRA config
-lora_r: 64
-lora_alpha: 128
-lora_dropout: 0.01
+lora_r: 128
+lora_alpha: 256
+lora_dropout: 0
 
 # -------- Logging --------
 log_dir: "./logs"
 log_every_n_steps: 10
 
 # -------- Checkpointing --------
-save_every_n_steps: 1000
+save_every_n_steps: 200
 resume_from_checkpoint: "latest"
 
 # -------- Inference Defaults (for convenience) --------

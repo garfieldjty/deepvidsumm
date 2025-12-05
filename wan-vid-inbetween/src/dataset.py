@@ -196,12 +196,13 @@ class InbetweenVideoDataset(Dataset):
             # If valid frames found, return them
             if frames is not None:
                 # Convert to tensor [T, C, H, W]
-                video_np = np.stack(frames, axis=0).astype(np.float32) / 255.0
+                # Normalize to [-1, 1] range as expected by Wan VAE
+                video_np = np.stack(frames, axis=0).astype(np.float32) * (2.0 / 255.0) - 1.0
                 video_np = np.transpose(video_np, (0, 3, 1, 2))
                 video = torch.from_numpy(video_np)
 
                 return {
-                    "video": video,    # [T, 3, H, W]
+                    "video": video,    # [T, 3, H, W] in [-1, 1] range
                     "path": str(vid_path),
                 }
             

@@ -167,6 +167,33 @@ class InbetweenTrainer:
         # Track global step (may be restored from checkpoint)
         self.global_step = 0
 
+
+    def _sample_timesteps(self, batch_size: int, device: torch.device, timestep_sampling_power: float) -> torch.Tensor:
+        """
+        Stratified + power-biased sampling over [0, T).
+
+        - Stratification reduces variance across the batch.
+        - `timestep_sampling_power` lets you bias towards early or late times:
+            * 1.0  -> uniform
+            * 0.5  -> focus more on small t (cleaner/noisier mid region)
+            * 2.0  -> focus more on large t (very noisy region)
+        """
+        T = self.scheduler.config.num_train_timesteps
+
+        # stratified samples in [0, 1)
+        u = torch.rand(batch_size, device=device)
+        strata = (torch.arange(batch_size, device=device, dtype=u.dtype) + u) / batch_size  # (0,1)
+
+        # optional bias in log-space of t
+        p = timestep_sampling_power
+        if p != 1.0:
+            strata = strata ** p  # p<1 -> concentrates near 0, p>1 -> concentrates near 1
+
+        # map to [0, T)
+        t = strata * T
+        return t
+
+
     def save_checkpoint(self, step: int):
         """Save a checkpoint for pause/resume."""
         if not self.acc.is_local_main_process:
@@ -357,10 +384,8 @@ class InbetweenTrainer:
 
                     # Noise & timestep (only for mid)
                     noise = torch.randn_like(mid_lat)
-                    
-                    # Sample random timesteps for flow matching training
-                    # Use continuous timesteps in [0, 1000] range to match scheduler convention
-                    t = torch.rand(B, device=device) * self.scheduler.config.num_train_timesteps
+
+                    t = self._sample_timesteps(B, device, 0.5)
                     
                     # Flow matching interpolation: x_t = (1 - t/T) * x_0 + (t/T) * noise
                     # where T = num_train_timesteps (typically 1000)
@@ -399,6 +424,19 @@ class InbetweenTrainer:
                     # Flow matching target: velocity field (noise - x_0)
                     target = noise - mid_lat
                     loss = torch.nn.functional.mse_loss(pred_mid.float(), target.float())
+
+                    # lambda_bound = 0.1  # tune
+
+                    # # in clean latent space (x0), boundaries are:
+                    # mid_first_clean = mid_lat[:, :, 0]          # latent at start of mid
+                    # mid_last_clean  = mid_lat[:, :, -1]         # latent at end of mid
+                    # start_last      = start_lat[:, :, -1]
+                    # end_first       = end_lat[:, :, 0]
+
+                    # boundary_loss = torch.nn.functional.mse_loss(mid_first_clean, start_last) + \
+                    #                 torch.nn.functional.mse_loss(mid_last_clean,  end_first)
+
+                    # loss = loss + lambda_bound * boundary_loss
 
                     self.acc.backward(loss)
                     self.optim.step()

@@ -56,14 +56,14 @@ def _frames_to_tensor(frames: List[np.ndarray], height: int, width: int) -> torc
         width: target width for resizing
     
     Returns:
-        tensor [1, 3, T, H, W] in [0, 1] range
+        tensor [1, 3, T, H, W] in [-1, 1] range (as expected by Wan VAE)
     """
     # Resize frames using training's resize function
     resized = resize_frames(frames, height, width)
     
-    # Stack and convert to float32 (same as training)
+    # Stack and convert to float32, then normalize to [-1, 1] (Wan VAE expects this range)
     video_np = np.stack(resized, axis=0)  # [T, H, W, 3]
-    video_np = video_np.astype(np.float32) / 255.0
+    video_np = video_np.astype(np.float32) * (2.0 / 255.0) - 1.0
     
     # Transpose to [T, 3, H, W]
     video_np = np.transpose(video_np, (0, 3, 1, 2))
@@ -301,11 +301,12 @@ def generate_inbetween_around_cut(
     with torch.no_grad():
         # Decode the entire sequence at once (matches training)
         dec = vae.decode(latents_full_unnorm).sample  # [1, 3, T_total_lat, H, W]
+        # VAE outputs in [-1, 1] range, convert to [0, 255] for uint8
         dec = dec.clamp(-1, 1)
-        dec = (dec + 1.0) / 2.0  # [-1,1] -> [0,1]
         dec_np = dec.squeeze(0).cpu().numpy()  # [3, T_total_lat, H, W]
         dec_np = np.transpose(dec_np, (1, 2, 3, 0))  # [T_total_lat, H, W, 3]
-        dec_np = (dec_np * 255.0).astype(np.uint8)
+        # Convert from [-1, 1] to [0, 255]
+        dec_np = ((dec_np / 2.0 + 0.5) * 255.0).clip(0, 255).astype(np.uint8)
 
     # 12) Convert all decoded frames to PIL
     all_frames = [Image.fromarray(frame) for frame in dec_np]
@@ -510,11 +511,12 @@ def generate_inbetween_from_two_videos(
     with torch.no_grad():
         # Decode the entire sequence at once (matches training)
         dec = vae.decode(latents_full_unnorm).sample
+        # VAE outputs in [-1, 1] range, convert to [0, 255] for uint8
         dec = dec.clamp(-1, 1)
-        dec = (dec + 1.0) / 2.0
         dec_np = dec.squeeze(0).cpu().numpy()
         dec_np = np.transpose(dec_np, (1, 2, 3, 0))
-        dec_np = (dec_np * 255.0).astype(np.uint8)
+        # Convert from [-1, 1] to [0, 255]
+        dec_np = ((dec_np / 2.0 + 0.5) * 255.0).clip(0, 255).astype(np.uint8)
 
     # 12) Convert all decoded frames to PIL
     all_frames = [Image.fromarray(frame) for frame in dec_np]
