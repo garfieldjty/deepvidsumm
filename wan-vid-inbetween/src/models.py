@@ -5,7 +5,7 @@ from diffusers import (
     AutoencoderKLWan,
     FlowMatchEulerDiscreteScheduler,
 )
-from peft import AdaLoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model
 
 try:
     # Newer PEFT: has TaskType enum
@@ -88,17 +88,11 @@ def add_lora_to_transformer(transformer, r, alpha, dropout, total_steps):
         "ffn.net.2",       # FFN output projection
     ]
 
-    config = AdaLoraConfig(
+    config = LoraConfig(
         r=r,
         lora_alpha=alpha,
         target_modules=target_modules,
         lora_dropout=dropout,
         bias="none",
-        init_r=r,
-        target_r=r//4,
-        tinit=int(total_steps * 0.1),
-        tfinal=int(total_steps * 0.2),
-        deltaT=int(total_steps * 0.1),
-        total_step=total_steps,
     )
     return get_peft_model(transformer, config)

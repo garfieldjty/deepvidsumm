@@ -40,7 +40,7 @@ cut_annotations_path: "/home/tjiao/cv_proj/dep/clipshots/annotations/train_middl
 use_cut_focused_sampling: true
 
 # Probability that a given sample is cut-focused; otherwise random window
-cut_focus_prob: 0.9
+cut_focus_prob: 0.8
 
 
 # -------- Training --------

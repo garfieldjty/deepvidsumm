@@ -40,22 +40,22 @@ cut_annotations_path: "/workspace/deepvidsumm/dep/clipshots/annotations/train_mi
 use_cut_focused_sampling: true
 
 # Probability that a given sample is cut-focused; otherwise random window
-cut_focus_prob: 0.9
+cut_focus_prob: 0.6
 
 
 # -------- Training --------
 train_batch_size: 1
-gradient_accumulation_steps: 16
+gradient_accumulation_steps: 32
 
 num_train_steps: 3000
-learning_rate: 1.0e-3
+learning_rate: 1.0e-5
 seed: 68
 
 output_dir: "./outputs/inbetween_lora"
 
 # LoRA config
-lora_r: 128
-lora_alpha: 256
+lora_r: 64
+lora_alpha: 128
 lora_dropout: 0
 
 # -------- Logging --------
