@@ -26,7 +26,7 @@ vae_precision: "fp32"
 attn_implementation: "sdpa"
 
 # -------- Data --------
-data_root: "/home/tjiao/cv_proj/dep/clipshots/videos/ClipShots_extracted/ClipShots/videos/train"
+data_root: "/workspace/deepvidsumm/dep/clipshots/videos/ClipShots/videos/train"
 video_glob: "**/*.mp4"        # glob under data_root
 
 # Number of raw frames per training sample (before VAE downsampling)
@@ -42,13 +42,13 @@ mid_frames: 60
 end_frames: 30
 
 # Hard-cut annotations (JSON: { "video_name.mp4": [cut_idx1, cut_idx2, ...], ... })
-cut_annotations_path: "/home/tjiao/cv_proj/dep/clipshots/annotations/train_middle_frames.json"
+cut_annotations_path: "/workspace/deepvidsumm/dep/clipshots/annotations/train_middle_frames.json"
 
 # If true, the dataset tries to sample windows centered around annotated cuts
-use_cut_focused_sampling: true
+use_cut_focused_sampling: false
 
 # Probability that a given sample is cut-focused; otherwise random window
-cut_focus_prob: 0.66
+cut_focus_prob: 0.6
 
 
 # -------- Training --------
@@ -69,7 +69,7 @@ lora_dropout: 0
 # -------- Fusion MLP (Pre-trained, Frozen) --------
 # Path to the pre-trained fusion MLP weights
 # Train this first using train_fusion_mlp.py with fusion_mlp_config.yaml
-pretrained_fusion_mlp_path: "./outputs/fusion_mlp/fusion_mlp_final.pt"
+pretrained_fusion_mlp_path: "./outputs/fusion_mlp/fusion_mlp.pt"
 
 # MLP architecture (must match the pre-trained model)
 fusion_hidden_dim: 256
@@ -85,7 +85,7 @@ loss_weight_bwd: 1.0
 # -------- Sparse Generation --------
 # Only run forward/backward DiT for frames where their weight > threshold
 # This saves compute by not generating frames where the model has low responsibility
-weight_threshold: 0.3
+weight_threshold: 0.5
 
 # -------- Logging --------
 log_dir: "./logs"

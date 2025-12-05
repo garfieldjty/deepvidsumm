@@ -754,9 +754,6 @@ class BidirectionalTrainConfig:
     fusion_num_layers: int = 3
     cnn_feature_dim: int = 64  # Output feature dim from CNN spatial encoder
     pretrained_fusion_mlp_path: Optional[str] = None  # Path to pre-trained fusion MLP weights
-    # Loss weights
-    loss_weight_fwd: float = 1.0
-    loss_weight_bwd: float = 1.0
     # Sparse generation threshold
     weight_threshold: float = 0.3  # Only generate fwd/bwd for frames with weight > threshold
 
@@ -1037,7 +1034,8 @@ class BidirectionalInbetweenTrainer:
         """
         device = self.acc.device
         self.transformer.train()
-        self.fusion_mlp.train()
+        # Fusion MLP is frozen - keep in eval mode for consistent behavior
+        self.fusion_mlp.eval()
         self.vae.eval()
 
         # Resume from checkpoint if specified
@@ -1066,7 +1064,7 @@ class BidirectionalInbetweenTrainer:
         )
 
         # Loss tracking
-        running_losses = {"total": 0.0, "fwd": 0.0, "bwd": 0.0, "weight": 0.0}
+        running_losses = {"total": 0.0, "fwd": 0.0, "bwd": 0.0}
         running_stats = {"fwd_frames": 0.0, "bwd_frames": 0.0}
         loss_count = 0
         
@@ -1075,7 +1073,8 @@ class BidirectionalInbetweenTrainer:
 
         while step < self.cfg.num_train_steps:
             for batch in self.dl:
-                with self.acc.accumulate(self.transformer, self.fusion_mlp):
+                # Only accumulate on transformer (fusion_mlp is frozen)
+                with self.acc.accumulate(self.transformer):
                     # Video: [B, T, C, H, W] -> [B, C, T, H, W]
                     video = batch["video"].to(device, non_blocking=True)
                     video = video.permute(0, 2, 1, 3, 4)
@@ -1131,34 +1130,19 @@ class BidirectionalInbetweenTrainer:
                     # =========================================================
                     # STEP 1: Predict fusion weights from start/end latents
                     # =========================================================
-                    w_fwd_pred, w_bwd_pred = self.fusion_mlp(start_lat, end_lat, T_mid_lat)
+                    with torch.no_grad():
+                        # MLP is frozen, so no gradients needed
+                        w_fwd_pred, w_bwd_pred = self.fusion_mlp(start_lat, end_lat, T_mid_lat)
                     # w_fwd_pred, w_bwd_pred: [B, T_mid_lat]
                     
                     # =========================================================
-                    # STEP 2: Compute GT weights from latent similarity
-                    # =========================================================
-                    with torch.no_grad():
-                        w_fwd_gt, w_bwd_gt = CumulativeSoftmaxFusionMLP.compute_gt_weights_from_similarity(
-                            mid_lat, start_lat, end_lat
-                        )
-                    
-                    # =========================================================
-                    # STEP 3: Weight prediction loss (trains fusion MLP)
-                    # =========================================================
-                    loss_weight = torch.nn.functional.mse_loss(w_fwd_pred, w_fwd_gt)
-                    
-                    # =========================================================
-                    # STEP 4: Determine which frames to generate for each model
+                    # STEP 2: Determine which frames to generate for each model
                     # Forward model: generate frames where w_fwd > threshold
                     # Backward model: generate frames where w_bwd > threshold
                     # =========================================================
-                    # Use predicted weights (detached) for masking
-                    w_fwd_detached = w_fwd_pred.detach()
-                    w_bwd_detached = w_bwd_pred.detach()
-                    
                     # Mask per frame: [B, T_mid_lat]
-                    fwd_mask = w_fwd_detached > threshold  # frames where forward should contribute
-                    bwd_mask = w_bwd_detached > threshold  # frames where backward should contribute
+                    fwd_mask = w_fwd_pred > threshold  # frames where forward should contribute
+                    bwd_mask = w_bwd_pred > threshold  # frames where backward should contribute
                     
                     # Track statistics
                     num_fwd_frames = fwd_mask.float().sum().item()
@@ -1181,8 +1165,10 @@ class BidirectionalInbetweenTrainer:
                     target = noise - mid_lat
 
                     # Initialize losses
-                    loss_fwd = torch.tensor(0.0, device=device)
-                    loss_bwd = torch.tensor(0.0, device=device)
+                    loss_fwd = None
+                    loss_bwd = None
+                    loss_fwd_value = 0.0
+                    loss_bwd_value = 0.0
 
                     # =========================================================
                     # STEP 5: Forward pass (only if any frame needs it)
@@ -1209,12 +1195,14 @@ class BidirectionalInbetweenTrainer:
                         
                         # Compute weighted loss only for frames where w_fwd > threshold
                         # Weight by the actual predicted weight (higher weight = more responsibility)
-                        fwd_weights = w_fwd_detached.view(B, 1, T_mid_lat, 1, 1)
-                        fwd_mask_5d = fwd_mask.view(B, 1, T_mid_lat, 1, 1).float()
-                        
                         fwd_sq_error = (pred_mid_fwd.float() - target.float()) ** 2
-                        # Only compute loss for masked frames, weighted by their predicted weight
-                        loss_fwd = (fwd_sq_error * fwd_weights * fwd_mask_5d).sum() / (fwd_mask_5d.sum() + 1e-8)
+                        # Use mean over C, H, W dimensions per frame, then weight by fwd_weights
+                        fwd_sq_error_per_frame = fwd_sq_error.mean(dim=(1, 3, 4))  # [B, T_mid_lat]
+                        fwd_mask_2d = fwd_mask.float()   # [B, T_mid_lat]
+                        # Normalize by sum of weights (not count) for proper averaging
+                        weight_sum_fwd = (w_fwd_pred.detach() * fwd_mask_2d).sum() + 1e-8
+                        loss_fwd = (fwd_sq_error_per_frame * w_fwd_pred.detach() * fwd_mask_2d).sum() / weight_sum_fwd
+                        loss_fwd_value = loss_fwd.detach().item()
 
                     # =========================================================
                     # STEP 6: Backward pass (only if any frame needs it)
@@ -1240,40 +1228,48 @@ class BidirectionalInbetweenTrainer:
                         pred_mid_bwd = pred_bwd_full[:, :, :T_mid_lat]
                         
                         # Compute weighted loss only for frames where w_bwd > threshold
-                        bwd_weights = w_bwd_detached.view(B, 1, T_mid_lat, 1, 1)
-                        bwd_mask_5d = bwd_mask.view(B, 1, T_mid_lat, 1, 1).float()
+                        bwd_mask_2d = bwd_mask.float()   # [B, T_mid_lat]
                         
                         bwd_sq_error = (pred_mid_bwd.float() - target.float()) ** 2
-                        loss_bwd = (bwd_sq_error * bwd_weights * bwd_mask_5d).sum() / (bwd_mask_5d.sum() + 1e-8)
+                        # Use mean over C, H, W dimensions per frame, then weight by bwd_weights
+                        bwd_sq_error_per_frame = bwd_sq_error.mean(dim=(1, 3, 4))  # [B, T_mid_lat]
+                        # Normalize by sum of weights (not count) for proper averaging
+                        weight_sum_bwd = (w_bwd_pred.detach() * bwd_mask_2d).sum() + 1e-8
+                        loss_bwd = (bwd_sq_error_per_frame * w_bwd_pred.detach() * bwd_mask_2d).sum() / weight_sum_bwd
+                        loss_bwd_value = loss_bwd.detach().item()
 
                     # =========================================================
-                    # STEP 7: Backward passes (MLP is frozen, only train LoRA)
+                    # STEP 7: Combined backward pass
+                    # Compute gradients for both forward and backward losses together
                     # =========================================================
-                    # loss_fwd -> transformer LoRA (if computed)
-                    if fwd_mask.any():
-                        self.acc.backward(self.cfg.loss_weight_fwd * loss_fwd, retain_graph=bwd_mask.any())
-                    
-                    # loss_bwd -> transformer LoRA (if computed)
-                    if bwd_mask.any():
-                        self.acc.backward(self.cfg.loss_weight_bwd * loss_bwd)
+                    # Build total loss - start from a tensor that can accumulate grads
+                    if loss_fwd is not None and loss_bwd is not None:
+                        total_loss = loss_fwd + loss_bwd
+                        self.acc.backward(total_loss)
+                    elif loss_fwd is not None:
+                        total_loss = loss_fwd
+                        self.acc.backward(total_loss)
+                    elif loss_bwd is not None:
+                        total_loss = loss_bwd
+                        self.acc.backward(total_loss)
+                    else:
+                        # Edge case: no frames passed threshold for either direction
+                        # Skip backward, just zero grad (should rarely happen with threshold=0.3)
+                        pass
 
                     self.optim.step()
                     self.optim.zero_grad()
 
                     # Total loss for logging
-                    loss = (
-                        self.cfg.loss_weight_fwd * loss_fwd +
-                        self.cfg.loss_weight_bwd * loss_bwd
-                    )
+                    loss_total_value = loss_fwd_value + loss_bwd_value
 
                     step += 1
                     pbar.update(1)
 
                     # Track losses
-                    running_losses["total"] += loss.detach().item()
-                    running_losses["fwd"] += loss_fwd.detach().item()
-                    running_losses["bwd"] += loss_bwd.detach().item()
-                    running_losses["weight"] += loss_weight.detach().item()
+                    running_losses["total"] += loss_total_value
+                    running_losses["fwd"] += loss_fwd_value
+                    running_losses["bwd"] += loss_bwd_value
                     running_stats["fwd_frames"] += num_fwd_frames
                     running_stats["bwd_frames"] += num_bwd_frames
                     loss_count += 1
@@ -1284,14 +1280,12 @@ class BidirectionalInbetweenTrainer:
                             avg_total = running_losses["total"] / loss_count
                             avg_fwd = running_losses["fwd"] / loss_count
                             avg_bwd = running_losses["bwd"] / loss_count
-                            avg_weight = running_losses["weight"] / loss_count
                             avg_fwd_frames = running_stats["fwd_frames"] / loss_count
                             avg_bwd_frames = running_stats["bwd_frames"] / loss_count
                             
                             self.writer.add_scalar("train/loss_total", avg_total, step)
                             self.writer.add_scalar("train/loss_forward", avg_fwd, step)
                             self.writer.add_scalar("train/loss_backward", avg_bwd, step)
-                            self.writer.add_scalar("train/loss_weight", avg_weight, step)
                             self.writer.add_scalar("train/timestep_mean", t.mean().item(), step)
                             
                             # Log sparsity statistics
@@ -1308,7 +1302,6 @@ class BidirectionalInbetweenTrainer:
                                 "loss": f"{avg_total:.4f}",
                                 "fwd": f"{avg_fwd:.4f}",
                                 "bwd": f"{avg_bwd:.4f}",
-                                "w": f"{avg_weight:.4f}",
                             })
                         
                         running_losses = {k: 0.0 for k in running_losses}

@@ -91,10 +91,6 @@ def main():
         cnn_feature_dim=cfg.get("cnn_feature_dim", 64),
         pretrained_fusion_mlp_path=cfg.get("pretrained_fusion_mlp_path", None),
         
-        # Loss weights
-        loss_weight_fwd=cfg.get("loss_weight_fwd", 1.0),
-        loss_weight_bwd=cfg.get("loss_weight_bwd", 1.0),
-        
         # Sparse generation threshold
         weight_threshold=cfg.get("weight_threshold", 0.3),
         
@@ -128,7 +124,6 @@ def main():
     else:
         print(f"Fusion MLP weights: random init (WARNING: not recommended)")
     print(f"Weight threshold: {train_cfg.weight_threshold}")
-    print(f"Loss weights: fwd={train_cfg.loss_weight_fwd}, bwd={train_cfg.loss_weight_bwd}")
     print("=" * 60 + "\n")
 
     trainer = BidirectionalInbetweenTrainer(train_cfg)

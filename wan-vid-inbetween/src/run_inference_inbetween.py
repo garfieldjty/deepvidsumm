@@ -1,13 +1,37 @@
 # src/run_inference_inbetween.py
+"""
+Inference script for video inbetweening.
+
+Supports both:
+- Standard (unidirectional) model: uses --lora_path only
+- Bidirectional model: uses --lora_path + --fusion_mlp_path
+
+Examples:
+    # Standard model
+    python -m src.run_inference_inbetween --lora_path ./outputs/inbetween_lora \\
+        --start_video_path video.mp4 --start_frame_index 0 --start_duration 30 \\
+        --end_video_path video.mp4 --end_frame_index 90 --end_duration 30
+    
+    # Bidirectional model  
+    python -m src.run_inference_inbetween --lora_path ./outputs/bidirectional_lora/lora \\
+        --fusion_mlp_path ./outputs/bidirectional_lora/fusion_mlp.pt \\
+        --start_video_path video.mp4 --start_frame_index 0 --start_duration 30 \\
+        --end_video_path video.mp4 --end_frame_index 90 --end_duration 30
+"""
 import argparse
 from accelerate import Accelerator
 
 from .utils import load_config
-from .inference import generate_inbetween_from_two_videos
+from .inference import (
+    generate_inbetween_from_two_videos,
+    generate_bidirectional_inbetween_from_two_videos,
+)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Wan2.2 inbetweening inference")
+    parser = argparse.ArgumentParser(
+        description="Run Wan2.2 inbetweening inference (supports both unidirectional and bidirectional models)"
+    )
     parser.add_argument(
         "--config",
         type=str,
@@ -34,11 +58,47 @@ def main():
     parser.add_argument("--output_path", type=str, help="Output video path")
     parser.add_argument("--transformer_precision", type=str, choices=["bf16", "fp16", "no"], help="Transformer precision")
     parser.add_argument("--vae_precision", type=str, choices=["fp32", "fp16"], help="VAE precision")
+    
+    # Bidirectional model parameters
+    parser.add_argument(
+        "--fusion_mlp_path", 
+        type=str, 
+        default=None,
+        help="Path to fusion MLP weights (enables bidirectional mode)"
+    )
+    parser.add_argument(
+        "--attn_implementation",
+        type=str,
+        default="sdpa",
+        choices=["sdpa", "flash_attention_2", "eager"],
+        help="Attention implementation to use",
+    )
+    parser.add_argument(
+        "--fusion_hidden_dim",
+        type=int,
+        default=256,
+        help="Hidden dimension of fusion MLP (if bidirectional)",
+    )
+    parser.add_argument(
+        "--fusion_num_layers",
+        type=int,
+        default=3,
+        help="Number of layers in fusion MLP (if bidirectional)",
+    )
+    parser.add_argument(
+        "--cnn_feature_dim",
+        type=int,
+        default=64,
+        help="CNN feature dimension in fusion MLP (if bidirectional)",
+    )
 
     args = parser.parse_args()
 
     # Initialize accelerator for distributed inference support
     accelerator = Accelerator()
+    
+    # Check if using bidirectional mode
+    use_bidirectional = args.fusion_mlp_path is not None
     
     # Load config file
     cfg = load_config(args.config)
@@ -74,36 +134,70 @@ def main():
     vae_precision = args.vae_precision or cfg.get("vae_precision", "fp32")
     
     if accelerator.is_main_process:
-        print(f"Running inference with config from: {args.config}")
-        print(f"  Base model: {base_model_path}")
-        print(f"  LoRA path: {args.lora_path}")
-        print(f"  Start video: {args.start_video_path} (frame {args.start_frame_index}, duration {args.start_duration})")
-        print(f"  End video: {args.end_video_path} (frame {args.end_frame_index}, duration {args.end_duration})")
-        print(f"  Frames to generate: {mid_frames}")
-        print(f"  Resolution: {height}x{width}")
-        print(f"  Steps: {num_inference_steps}, FPS: {out_fps}")
+        print(f"\n{'='*60}")
+        print("VIDEO INBETWEENING INFERENCE")
+        print(f"{'='*60}")
+        print(f"Mode: {'BIDIRECTIONAL' if use_bidirectional else 'STANDARD (unidirectional)'}")
+        print(f"Config: {args.config}")
+        print(f"Base model: {base_model_path}")
+        print(f"LoRA path: {args.lora_path}")
+        if use_bidirectional:
+            print(f"Fusion MLP: {args.fusion_mlp_path}")
+        print(f"Start video: {args.start_video_path} (frame {args.start_frame_index}, duration {args.start_duration})")
+        print(f"End video: {args.end_video_path} (frame {args.end_frame_index}, duration {args.end_duration})")
+        print(f"Frames to generate: {mid_frames}")
+        print(f"Resolution: {height}x{width}")
+        print(f"Steps: {num_inference_steps}, FPS: {out_fps}")
+        print(f"{'='*60}\n")
 
-    out = generate_inbetween_from_two_videos(
-        base_model_path=base_model_path,
-        lora_path=args.lora_path,
-        start_video_path=args.start_video_path,
-        start_frame_index=args.start_frame_index,
-        start_duration=args.start_duration,
-        end_video_path=args.end_video_path,
-        end_frame_index=args.end_frame_index,
-        end_duration=args.end_duration,
-        mid_frames=mid_frames,
-        height=height,
-        width=width,
-        num_inference_steps=num_inference_steps,
-        out_fps=out_fps,
-        transformer_precision=transformer_precision,
-        vae_precision=vae_precision,
-        output_path=output_path,
-    )
+    if use_bidirectional:
+        # Bidirectional model inference
+        out = generate_bidirectional_inbetween_from_two_videos(
+            base_model_path=base_model_path,
+            lora_path=args.lora_path,
+            fusion_mlp_path=args.fusion_mlp_path,
+            start_video_path=args.start_video_path,
+            start_frame_index=args.start_frame_index,
+            start_duration=args.start_duration,
+            end_video_path=args.end_video_path,
+            end_frame_index=args.end_frame_index,
+            end_duration=args.end_duration,
+            mid_frames=mid_frames,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            out_fps=out_fps,
+            transformer_precision=transformer_precision,
+            vae_precision=vae_precision,
+            attn_implementation=args.attn_implementation,
+            fusion_hidden_dim=args.fusion_hidden_dim,
+            fusion_num_layers=args.fusion_num_layers,
+            cnn_feature_dim=args.cnn_feature_dim,
+            output_path=output_path,
+        )
+    else:
+        # Standard unidirectional model inference
+        out = generate_inbetween_from_two_videos(
+            base_model_path=base_model_path,
+            lora_path=args.lora_path,
+            start_video_path=args.start_video_path,
+            start_frame_index=args.start_frame_index,
+            start_duration=args.start_duration,
+            end_video_path=args.end_video_path,
+            end_frame_index=args.end_frame_index,
+            end_duration=args.end_duration,
+            mid_frames=mid_frames,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            out_fps=out_fps,
+            transformer_precision=transformer_precision,
+            vae_precision=vae_precision,
+            output_path=output_path,
+        )
     
     if accelerator.is_main_process:
-        print(f"Saved: {out}")
+        print(f"\n✓ Saved: {out}")
 
 
 if __name__ == "__main__":

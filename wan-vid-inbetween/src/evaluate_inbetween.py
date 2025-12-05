@@ -9,13 +9,17 @@ This script:
 4. Compares generated frames with ground truth middle frames
 5. Computes quality metrics (SSIM, VMAF, PSNR)
 6. Saves results and video clips to an output folder
+
+Supports both:
+- Standard (unidirectional) model: --lora_path only
+- Bidirectional model: --lora_path + --fusion_mlp_path
 """
 
 import argparse
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import shutil
 import subprocess
 
@@ -27,7 +31,10 @@ from tqdm import tqdm
 import pandas as pd
 from accelerate import Accelerator
 
-from .inference import generate_inbetween_from_two_videos
+from .inference import (
+    generate_inbetween_from_two_videos,
+    generate_bidirectional_inbetween_from_two_videos,
+)
 from .utils import load_config
 
 
@@ -350,6 +357,12 @@ def evaluate_single_cut(
     transformer_precision: str = "bf16",
     vae_precision: str = "fp32",
     accelerator: Accelerator = None,
+    # Bidirectional model parameters
+    fusion_mlp_path: Optional[str] = None,
+    attn_implementation: str = "sdpa",
+    fusion_hidden_dim: int = 256,
+    fusion_num_layers: int = 3,
+    cnn_feature_dim: int = 64,
 ) -> Dict:
     """
     Evaluate model on a single cut.
@@ -371,10 +384,18 @@ def evaluate_single_cut(
         out_fps: Output FPS
         transformer_precision: Transformer precision
         vae_precision: VAE precision
+        fusion_mlp_path: Path to fusion MLP weights (if using bidirectional model)
+        attn_implementation: Attention implementation ("sdpa", "flash_attention_2", "eager")
+        fusion_hidden_dim: Hidden dim of fusion MLP (if bidirectional)
+        fusion_num_layers: Num layers in fusion MLP (if bidirectional)
+        cnn_feature_dim: CNN feature dim in fusion MLP (if bidirectional)
         
     Returns:
         Dictionary with evaluation metrics
     """
+    # Determine if using bidirectional model
+    use_bidirectional = fusion_mlp_path is not None
+    
     # Create output subdirectory for this cut
     cut_output_dir = os.path.join(output_dir, f"{video_name}_cut{cut_idx}")
     os.makedirs(cut_output_dir, exist_ok=True)
@@ -423,24 +444,51 @@ def evaluate_single_cut(
         # Generate inbetween frames
         generated_video_path = os.path.join(cut_output_dir, "generated_full.mp4")
         
-        generate_inbetween_from_two_videos(
-            base_model_path=base_model_path,
-            lora_path=lora_path,
-            start_video_path=video_path,
-            start_frame_index=max(0, start_frame_idx),
-            start_duration=start_duration,
-            end_video_path=video_path,
-            end_frame_index=max(0, end_frame_idx),
-            end_duration=end_duration,
-            mid_frames=mid_duration,
-            height=height,
-            width=width,
-            num_inference_steps=num_inference_steps,
-            out_fps=out_fps,
-            transformer_precision=transformer_precision,
-            vae_precision=vae_precision,
-            output_path=generated_video_path,
-        )
+        if use_bidirectional:
+            # Use bidirectional model
+            generate_bidirectional_inbetween_from_two_videos(
+                base_model_path=base_model_path,
+                lora_path=lora_path,
+                fusion_mlp_path=fusion_mlp_path,
+                start_video_path=video_path,
+                start_frame_index=max(0, start_frame_idx),
+                start_duration=start_duration,
+                end_video_path=video_path,
+                end_frame_index=max(0, end_frame_idx),
+                end_duration=end_duration,
+                mid_frames=mid_duration,
+                height=height,
+                width=width,
+                num_inference_steps=num_inference_steps,
+                out_fps=out_fps,
+                transformer_precision=transformer_precision,
+                vae_precision=vae_precision,
+                attn_implementation=attn_implementation,
+                fusion_hidden_dim=fusion_hidden_dim,
+                fusion_num_layers=fusion_num_layers,
+                cnn_feature_dim=cnn_feature_dim,
+                output_path=generated_video_path,
+            )
+        else:
+            # Use standard unidirectional model
+            generate_inbetween_from_two_videos(
+                base_model_path=base_model_path,
+                lora_path=lora_path,
+                start_video_path=video_path,
+                start_frame_index=max(0, start_frame_idx),
+                start_duration=start_duration,
+                end_video_path=video_path,
+                end_frame_index=max(0, end_frame_idx),
+                end_duration=end_duration,
+                mid_frames=mid_duration,
+                height=height,
+                width=width,
+                num_inference_steps=num_inference_steps,
+                out_fps=out_fps,
+                transformer_precision=transformer_precision,
+                vae_precision=vae_precision,
+                output_path=generated_video_path,
+            )
         
         # Extract only the middle generated frames (skip conditioning frames)
         generated_all_frames = extract_frames_from_video(
@@ -589,8 +637,43 @@ def main():
         default=None,
         help="Maximum number of cuts per video to evaluate",
     )
+    # Bidirectional model arguments
+    parser.add_argument(
+        "--fusion_mlp_path",
+        type=str,
+        default=None,
+        help="Path to fusion MLP weights (enables bidirectional mode)",
+    )
+    parser.add_argument(
+        "--attn_implementation",
+        type=str,
+        default="sdpa",
+        choices=["sdpa", "flash_attention_2", "eager"],
+        help="Attention implementation to use",
+    )
+    parser.add_argument(
+        "--fusion_hidden_dim",
+        type=int,
+        default=256,
+        help="Hidden dimension of fusion MLP (if bidirectional)",
+    )
+    parser.add_argument(
+        "--fusion_num_layers",
+        type=int,
+        default=3,
+        help="Number of layers in fusion MLP (if bidirectional)",
+    )
+    parser.add_argument(
+        "--cnn_feature_dim",
+        type=int,
+        default=64,
+        help="CNN feature dimension in fusion MLP (if bidirectional)",
+    )
     
     args = parser.parse_args()
+    
+    # Check if using bidirectional mode
+    use_bidirectional = args.fusion_mlp_path is not None
     
     # Initialize accelerator for multi-GPU support
     accelerator = Accelerator()
@@ -611,6 +694,10 @@ def main():
     # Load cut annotations (only on main process)
     if accelerator.is_main_process:
         print(f"Loading cut annotations from: {args.cut_annotations}")
+        if use_bidirectional:
+            print(f"Using BIDIRECTIONAL model with fusion MLP: {args.fusion_mlp_path}")
+        else:
+            print(f"Using STANDARD (unidirectional) model")
     
     with open(args.cut_annotations, 'r') as f:
         cut_annotations = json.load(f)
@@ -696,6 +783,12 @@ def main():
                 transformer_precision=transformer_precision,
                 vae_precision=vae_precision,
                 accelerator=accelerator,
+                # Bidirectional model parameters
+                fusion_mlp_path=args.fusion_mlp_path,
+                attn_implementation=args.attn_implementation,
+                fusion_hidden_dim=args.fusion_hidden_dim,
+                fusion_num_layers=args.fusion_num_layers,
+                cnn_feature_dim=args.cnn_feature_dim,
             )
             
             if result:
