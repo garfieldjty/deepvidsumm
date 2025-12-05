@@ -61,6 +61,7 @@ class FusionMLPTrainConfig:
     # Fusion MLP settings
     fusion_hidden_dim: int = 256
     fusion_num_layers: int = 3
+    cnn_feature_dim: int = 64  # Output feature dim from CNN spatial encoder
     # Logging
     log_dir: str = "./logs"
     log_every_n_steps: int = 10
@@ -96,11 +97,12 @@ class FusionMLPTrainer:
         # Get latent channel dimension from VAE config
         latent_dim = self.vae.config.z_dim
         
-        # Create fusion MLP
+        # Create fusion MLP with CNN spatial encoder
         self.fusion_mlp = CumulativeSoftmaxFusionMLP(
             latent_dim=latent_dim,
             hidden_dim=cfg.fusion_hidden_dim,
             num_layers=cfg.fusion_num_layers,
+            cnn_feature_dim=cfg.cnn_feature_dim,
         )
 
         # Optimizer
@@ -485,6 +487,7 @@ def main():
         vae_precision=cfg.get("vae_precision", "fp32"),
         fusion_hidden_dim=cfg.get("fusion_hidden_dim", 256),
         fusion_num_layers=cfg.get("fusion_num_layers", 3),
+        cnn_feature_dim=cfg.get("cnn_feature_dim", 64),
         log_dir=cfg.get("log_dir", "./logs"),
         log_every_n_steps=cfg.get("log_every_n_steps", 10),
         save_every_n_steps=cfg.get("save_every_n_steps", 500),
@@ -498,6 +501,7 @@ def main():
     print(f"Output: {train_cfg.output_dir}")
     print(f"Hidden dim: {train_cfg.fusion_hidden_dim}")
     print(f"Num layers: {train_cfg.fusion_num_layers}")
+    print(f"CNN feature dim: {train_cfg.cnn_feature_dim}")
     print("=" * 60 + "\n")
 
     trainer = FusionMLPTrainer(train_cfg)

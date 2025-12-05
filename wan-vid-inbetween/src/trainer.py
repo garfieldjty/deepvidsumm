@@ -31,6 +31,9 @@ class CumulativeSoftmaxFusionMLP(nn.Module):
     - w_fwd is monotonically decreasing (or non-increasing)
     - w_bwd is monotonically increasing (or non-decreasing)
     
+    Uses CNN-based spatial downscaling instead of aggressive global pooling
+    to preserve more spatial information for better weight prediction.
+    
     The MLP is trained by comparing predicted weights against ground-truth
     latent similarity patterns (how similar each mid frame is to start vs end).
     """
@@ -41,16 +44,41 @@ class CumulativeSoftmaxFusionMLP(nn.Module):
         hidden_dim: int = 256,
         num_layers: int = 3,
         max_frames: int = 64,  # Maximum number of mid frames to support
+        cnn_feature_dim: int = 64,  # Output feature dim from CNN encoder
     ):
         super().__init__()
         self.latent_dim = latent_dim
         self.max_frames = max_frames
+        self.cnn_feature_dim = cnn_feature_dim
         
-        # Input: concatenation of [start_last, end_first, frame_position_encoding]
-        # start_last: last frame of start segment (spatially pooled) -> latent_dim
-        # end_first: first frame of end segment (spatially pooled) -> latent_dim
-        # frame_pos: sinusoidal position encoding for each mid frame -> latent_dim
-        input_dim = latent_dim * 3
+        # CNN encoder to downsample spatial dimensions while preserving info
+        # Input: [B, C, H, W] -> Output: [B, cnn_feature_dim]
+        # Uses strided convolutions for progressive downsampling
+        self.spatial_encoder = nn.Sequential(
+            # First conv: C -> 32, reduce spatial by 2x
+            nn.Conv2d(latent_dim, 32, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, 32),
+            nn.SiLU(),
+            # Second conv: 32 -> 64, reduce spatial by 2x
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, 64),
+            nn.SiLU(),
+            # Third conv: 64 -> 64, reduce spatial by 2x
+            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(8, 64),
+            nn.SiLU(),
+            # Adaptive pool to fixed size (2x2) then flatten
+            nn.AdaptiveAvgPool2d((2, 2)),
+            nn.Flatten(),  # [B, 64 * 2 * 2] = [B, 256]
+            # Project to cnn_feature_dim
+            nn.Linear(64 * 4, cnn_feature_dim),
+            nn.SiLU(),
+        )
+        
+        # Input to MLP: [start_features, end_features, position_encoding]
+        # start/end features: cnn_feature_dim each
+        # position encoding: cnn_feature_dim (to match feature dimensions)
+        input_dim = cnn_feature_dim * 3
         
         layers = []
         layers.append(nn.Linear(input_dim, hidden_dim))
@@ -63,31 +91,32 @@ class CumulativeSoftmaxFusionMLP(nn.Module):
         
         self.mlp = nn.Sequential(*layers)
         
-        # Pre-compute position encoding frequencies (more efficient)
+        # Pre-compute position encoding frequencies
+        # Use cnn_feature_dim for position encoding to match CNN features
         self.register_buffer(
             'pos_freqs',
-            1.0 / (10000.0 ** (torch.arange(0, latent_dim, 2).float() / latent_dim))
+            1.0 / (10000.0 ** (torch.arange(0, cnn_feature_dim, 2).float() / cnn_feature_dim))
         )
-        self.pos_scale = latent_dim ** 0.5
+        self.pos_scale = cnn_feature_dim ** 0.5
         
     def _get_position_encodings_batch(self, T_mid: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         """
         Generate sinusoidal position encodings for all T_mid frames at once.
         
         Returns:
-            pos_enc: [T_mid, latent_dim] position encodings
+            pos_enc: [T_mid, cnn_feature_dim] position encodings
         """
         # Normalized positions in [0, 1]
         positions = torch.linspace(0, 1, T_mid, device=device, dtype=dtype)  # [T_mid]
         
-        # Compute angles: [T_mid, latent_dim // 2]
+        # Compute angles: [T_mid, cnn_feature_dim // 2]
         freqs = self.pos_freqs.to(device=device, dtype=dtype)
         angles = positions.unsqueeze(1) * freqs.unsqueeze(0) * self.pos_scale  # [T_mid, D/2]
         
         # Build position encoding
-        pe = torch.zeros(T_mid, self.latent_dim, device=device, dtype=dtype)
+        pe = torch.zeros(T_mid, self.cnn_feature_dim, device=device, dtype=dtype)
         pe[:, 0::2] = torch.sin(angles)
-        pe[:, 1::2] = torch.cos(angles[:, :self.latent_dim // 2])
+        pe[:, 1::2] = torch.cos(angles[:, :self.cnn_feature_dim // 2])
         
         return pe
     
@@ -108,24 +137,28 @@ class CumulativeSoftmaxFusionMLP(nn.Module):
         device = start_lat.device
         dtype = start_lat.dtype
         
-        # Global average pool the boundary frames
-        start_last = start_lat[:, :, -1].mean(dim=(-2, -1))  # [B, C]
-        end_first = end_lat[:, :, 0].mean(dim=(-2, -1))  # [B, C]
+        # Extract boundary frames: [B, C, H, W]
+        start_last_frame = start_lat[:, :, -1]  # last frame of start
+        end_first_frame = end_lat[:, :, 0]      # first frame of end
         
-        # Get all position encodings at once: [T_mid, C]
+        # CNN encode boundary frames: [B, C, H, W] -> [B, cnn_feature_dim]
+        start_features = self.spatial_encoder(start_last_frame)  # [B, cnn_feature_dim]
+        end_features = self.spatial_encoder(end_first_frame)      # [B, cnn_feature_dim]
+        
+        # Get all position encodings at once: [T_mid, cnn_feature_dim]
         pos_enc = self._get_position_encodings_batch(T_mid, device, dtype)
         
-        # Expand for batch: [B, T_mid, C]
+        # Expand for batch: [B, T_mid, cnn_feature_dim]
         pos_enc = pos_enc.unsqueeze(0).expand(B, -1, -1)
         
-        # Expand boundary features: [B, T_mid, C]
-        start_last_exp = start_last.unsqueeze(1).expand(-1, T_mid, -1)
-        end_first_exp = end_first.unsqueeze(1).expand(-1, T_mid, -1)
+        # Expand boundary features: [B, T_mid, cnn_feature_dim]
+        start_features_exp = start_features.unsqueeze(1).expand(-1, T_mid, -1)
+        end_features_exp = end_features.unsqueeze(1).expand(-1, T_mid, -1)
         
-        # Concatenate features: [B, T_mid, 3C]
-        feat = torch.cat([start_last_exp, end_first_exp, pos_enc], dim=-1)
+        # Concatenate features: [B, T_mid, 3 * cnn_feature_dim]
+        feat = torch.cat([start_features_exp, end_features_exp, pos_enc], dim=-1)
         
-        # Reshape for batch MLP: [B * T_mid, 3C]
+        # Reshape for batch MLP: [B * T_mid, 3 * cnn_feature_dim]
         feat_flat = feat.view(B * T_mid, -1)
         
         # MLP forward: [B * T_mid, 1]
@@ -719,6 +752,7 @@ class BidirectionalTrainConfig:
     # Fusion MLP settings
     fusion_hidden_dim: int = 256
     fusion_num_layers: int = 3
+    cnn_feature_dim: int = 64  # Output feature dim from CNN spatial encoder
     pretrained_fusion_mlp_path: Optional[str] = None  # Path to pre-trained fusion MLP weights
     # Loss weights
     loss_weight_fwd: float = 1.0
@@ -778,11 +812,12 @@ class BidirectionalInbetweenTrainer:
         # Get latent channel dimension from VAE config
         latent_dim = self.vae.config.z_dim
         
-        # Create fusion MLP
+        # Create fusion MLP with CNN spatial encoder
         self.fusion_mlp = CumulativeSoftmaxFusionMLP(
             latent_dim=latent_dim,
             hidden_dim=cfg.fusion_hidden_dim,
             num_layers=cfg.fusion_num_layers,
+            cnn_feature_dim=cfg.cnn_feature_dim,
         )
         
         # Load pre-trained fusion MLP if provided

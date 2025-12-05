@@ -88,6 +88,7 @@ def main():
         # Fusion MLP (pre-trained and frozen)
         fusion_hidden_dim=cfg.get("fusion_hidden_dim", 256),
         fusion_num_layers=cfg.get("fusion_num_layers", 3),
+        cnn_feature_dim=cfg.get("cnn_feature_dim", 64),
         pretrained_fusion_mlp_path=cfg.get("pretrained_fusion_mlp_path", None),
         
         # Loss weights

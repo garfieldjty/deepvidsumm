@@ -74,6 +74,7 @@ pretrained_fusion_mlp_path: "./outputs/fusion_mlp/fusion_mlp_final.pt"
 # MLP architecture (must match the pre-trained model)
 fusion_hidden_dim: 256
 fusion_num_layers: 3
+cnn_feature_dim: 64  # Output feature dim from CNN spatial encoder
 
 # -------- Loss Weights --------
 # loss_fwd: supervises LoRA on forward pass (only on frames where w_fwd > threshold)
