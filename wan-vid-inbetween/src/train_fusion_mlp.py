@@ -131,9 +131,9 @@ class FusionMLPTrainer:
             dataset, 
             batch_size=cfg.train_batch_size, 
             shuffle=True,
-            num_workers=8,
+            num_workers=4,
             pin_memory=True,
-            prefetch_factor=4,
+            prefetch_factor=2,
             persistent_workers=True
         )
 
@@ -322,15 +322,18 @@ class FusionMLPTrainer:
                     video_end = video[:, :, s_frames+m_frames:]
 
                     # Encode segments to latents
-                    with torch.no_grad():
+                    with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                         enc_start = self.vae.encode(video_start)
                         start_lat = retrieve_latents(enc_start)
+                        del enc_start
                         
                         enc_mid = self.vae.encode(video_mid)
                         mid_lat = retrieve_latents(enc_mid)
+                        del enc_mid
                         
                         enc_end = self.vae.encode(video_end)
                         end_lat = retrieve_latents(enc_end)
+                        del enc_end
 
                         # Normalize latents
                         if self.latents_mean is None:
@@ -367,13 +370,20 @@ class FusionMLPTrainer:
                     self.acc.backward(loss)
                     self.optim.step()
                     self.optim.zero_grad()
+                    
+                    # Track loss before clearing memory
+                    running_loss += loss.detach().item()
+                    loss_count += 1
+                    
+                    # Clear memory
+                    del video, video_start, video_mid, video_end
+                    del start_lat, mid_lat, end_lat
+                    del w_fwd_pred, w_bwd_pred, w_fwd_gt, w_bwd_gt
+                    if step % 10 == 0:
+                        torch.cuda.empty_cache()
 
                     step += 1
                     pbar.update(1)
-
-                    # Track loss
-                    running_loss += loss.detach().item()
-                    loss_count += 1
 
                     # TensorBoard logging
                     if self.writer and step % self.cfg.log_every_n_steps == 0:
@@ -381,16 +391,6 @@ class FusionMLPTrainer:
                             avg_loss = running_loss / loss_count
                             
                             self.writer.add_scalar("train/loss", avg_loss, step)
-                            
-                            # Log weight statistics
-                            w_fwd_mean = w_fwd_pred.mean().item()
-                            w_bwd_mean = w_bwd_pred.mean().item()
-                            w_fwd_gt_mean = w_fwd_gt.mean().item()
-                            
-                            self.writer.add_scalar("train/w_fwd_pred_mean", w_fwd_mean, step)
-                            self.writer.add_scalar("train/w_bwd_pred_mean", w_bwd_mean, step)
-                            self.writer.add_scalar("train/w_fwd_gt_mean", w_fwd_gt_mean, step)
-                            
                             pbar.set_postfix({"loss": f"{avg_loss:.6f}"})
                         
                         running_loss = 0.0

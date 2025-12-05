@@ -8,33 +8,33 @@
 # -------- Model --------
 # Only VAE is needed (transformer not used for MLP training)
 base_model_path: "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
-vae_precision: "fp32"
+vae_precision: "bf16"
 
 # -------- Data --------
-data_root: "/home/tjiao/cv_proj/dep/clipshots/videos/ClipShots_extracted/ClipShots/videos/train"
+data_root: "/workspace/deepvidsumm/dep/clipshots/videos/ClipShots/videos/train"
 video_glob: "**/*.mp4"
 
 clip_num_frames: 120
 
 resolution:
-  height: 384
-  width: 672
+  height: 256
+  width: 448
 
 start_frames: 30
 mid_frames: 60
 end_frames: 30
 
-cut_annotations_path: "/home/tjiao/cv_proj/dep/clipshots/annotations/train_middle_frames.json"
+cut_annotations_path: "/workspace/deepvidsumm/dep/clipshots/annotations/train_middle_frames.json"
 use_cut_focused_sampling: true
 cut_focus_prob: 0.66
 
 # -------- Training --------
 # MLP trains much faster than LoRA, can use larger batch sizes
-train_batch_size: 4
-gradient_accumulation_steps: 8
+train_batch_size: 8
+gradient_accumulation_steps: 16
 
 num_train_steps: 1000
-learning_rate: 1.0e-4
+learning_rate: 1.0e-3
 seed: 68
 
 output_dir: "./outputs/fusion_mlp"
