@@ -1,10 +1,12 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from pathlib import Path
 import json
 import os
+import copy
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from accelerate import Accelerator
@@ -14,6 +16,179 @@ from lion_pytorch import Lion
 from .utils_latents import retrieve_latents
 from .models import load_wan_components, add_lora_to_transformer
 from .dataset import InbetweenVideoDataset
+
+
+class CumulativeSoftmaxFusionMLP(nn.Module):
+    """
+    MLP that produces per-frame fusion weights using Cumulative Softmax.
+    
+    The Cumulative Softmax ensures monotonic blending weights that smoothly
+    transition from forward-generated frames (early) to backward-generated 
+    frames (later in the sequence).
+    
+    Given T_mid latent frames, produces weights w_fwd[t] and w_bwd[t] where:
+    - w_fwd + w_bwd = 1 (per frame)
+    - w_fwd is monotonically decreasing (or non-increasing)
+    - w_bwd is monotonically increasing (or non-decreasing)
+    
+    The MLP is trained by comparing predicted weights against ground-truth
+    latent similarity patterns (how similar each mid frame is to start vs end).
+    """
+    
+    def __init__(
+        self, 
+        latent_dim: int,  # Channel dimension of latents (e.g., 16 for Wan VAE)
+        hidden_dim: int = 256,
+        num_layers: int = 3,
+        max_frames: int = 64,  # Maximum number of mid frames to support
+    ):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.max_frames = max_frames
+        
+        # Input: concatenation of [start_last, end_first, frame_position_encoding]
+        # start_last: last frame of start segment (spatially pooled) -> latent_dim
+        # end_first: first frame of end segment (spatially pooled) -> latent_dim
+        # frame_pos: sinusoidal position encoding for each mid frame -> latent_dim
+        input_dim = latent_dim * 3
+        
+        layers = []
+        layers.append(nn.Linear(input_dim, hidden_dim))
+        layers.append(nn.SiLU())
+        for _ in range(num_layers - 2):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.SiLU())
+        # Output: logits for cumulative softmax (one per frame)
+        layers.append(nn.Linear(hidden_dim, 1))
+        
+        self.mlp = nn.Sequential(*layers)
+        
+        # Pre-compute position encoding frequencies (more efficient)
+        self.register_buffer(
+            'pos_freqs',
+            1.0 / (10000.0 ** (torch.arange(0, latent_dim, 2).float() / latent_dim))
+        )
+        self.pos_scale = latent_dim ** 0.5
+        
+    def _get_position_encodings_batch(self, T_mid: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """
+        Generate sinusoidal position encodings for all T_mid frames at once.
+        
+        Returns:
+            pos_enc: [T_mid, latent_dim] position encodings
+        """
+        # Normalized positions in [0, 1]
+        positions = torch.linspace(0, 1, T_mid, device=device, dtype=dtype)  # [T_mid]
+        
+        # Compute angles: [T_mid, latent_dim // 2]
+        freqs = self.pos_freqs.to(device=device, dtype=dtype)
+        angles = positions.unsqueeze(1) * freqs.unsqueeze(0) * self.pos_scale  # [T_mid, D/2]
+        
+        # Build position encoding
+        pe = torch.zeros(T_mid, self.latent_dim, device=device, dtype=dtype)
+        pe[:, 0::2] = torch.sin(angles)
+        pe[:, 1::2] = torch.cos(angles[:, :self.latent_dim // 2])
+        
+        return pe
+    
+    def forward(
+        self,
+        start_lat: torch.Tensor,  # [B, C, T_start, H, W]
+        end_lat: torch.Tensor,    # [B, C, T_end, H, W]
+        T_mid: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute fusion weights for each mid frame.
+        
+        Returns:
+            w_fwd: [B, T_mid] weights for forward-generated latents
+            w_bwd: [B, T_mid] weights for backward-generated latents
+        """
+        B, C, _, H, W = start_lat.shape
+        device = start_lat.device
+        dtype = start_lat.dtype
+        
+        # Global average pool the boundary frames
+        start_last = start_lat[:, :, -1].mean(dim=(-2, -1))  # [B, C]
+        end_first = end_lat[:, :, 0].mean(dim=(-2, -1))  # [B, C]
+        
+        # Get all position encodings at once: [T_mid, C]
+        pos_enc = self._get_position_encodings_batch(T_mid, device, dtype)
+        
+        # Expand for batch: [B, T_mid, C]
+        pos_enc = pos_enc.unsqueeze(0).expand(B, -1, -1)
+        
+        # Expand boundary features: [B, T_mid, C]
+        start_last_exp = start_last.unsqueeze(1).expand(-1, T_mid, -1)
+        end_first_exp = end_first.unsqueeze(1).expand(-1, T_mid, -1)
+        
+        # Concatenate features: [B, T_mid, 3C]
+        feat = torch.cat([start_last_exp, end_first_exp, pos_enc], dim=-1)
+        
+        # Reshape for batch MLP: [B * T_mid, 3C]
+        feat_flat = feat.view(B * T_mid, -1)
+        
+        # MLP forward: [B * T_mid, 1]
+        logits_flat = self.mlp(feat_flat)
+        
+        # Reshape back: [B, T_mid]
+        logits = logits_flat.view(B, T_mid)
+        
+        # Cumulative Softmax for monotonic weights
+        # w_bwd[t] = cumsum(softmax(logits))[t]
+        probs = torch.softmax(logits, dim=-1)  # [B, T_mid]
+        w_bwd = torch.cumsum(probs, dim=-1)    # [B, T_mid], monotonically increasing
+        w_fwd = 1.0 - w_bwd                     # [B, T_mid], monotonically decreasing
+        
+        return w_fwd, w_bwd
+    
+    @staticmethod
+    def compute_gt_weights_from_similarity(
+        mid_lat: torch.Tensor,    # [B, C, T_mid, H, W] - ground truth mid latents
+        start_lat: torch.Tensor,  # [B, C, T_start, H, W]
+        end_lat: torch.Tensor,    # [B, C, T_end, H, W]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute ground-truth fusion weights based on cosine similarity.
+        
+        For each mid frame, compute similarity to:
+        - Last frame of start segment (sim_start)
+        - First frame of end segment (sim_end)
+        
+        GT weights: w_fwd_gt = sim_start / (sim_start + sim_end + eps)
+        
+        Returns:
+            w_fwd_gt: [B, T_mid] ground-truth forward weights
+            w_bwd_gt: [B, T_mid] ground-truth backward weights
+        """
+        B, C, T_mid, H, W = mid_lat.shape
+        
+        # Flatten spatial dimensions for cosine similarity
+        # mid: [B, T_mid, C*H*W]
+        mid_flat = mid_lat.permute(0, 2, 1, 3, 4).reshape(B, T_mid, -1)
+        
+        # Reference frames: [B, C*H*W]
+        start_ref = start_lat[:, :, -1].reshape(B, -1)  # last frame of start
+        end_ref = end_lat[:, :, 0].reshape(B, -1)       # first frame of end
+        
+        # Normalize for cosine similarity
+        mid_norm = torch.nn.functional.normalize(mid_flat, dim=-1)
+        start_norm = torch.nn.functional.normalize(start_ref, dim=-1).unsqueeze(1)  # [B, 1, CHW]
+        end_norm = torch.nn.functional.normalize(end_ref, dim=-1).unsqueeze(1)      # [B, 1, CHW]
+        
+        # Cosine similarity: [B, T_mid]
+        sim_start = (mid_norm * start_norm).sum(dim=-1)  # similarity to start
+        sim_end = (mid_norm * end_norm).sum(dim=-1)      # similarity to end
+        
+        # Convert to weights (shifted to [0, 1] range since cosine can be negative)
+        # Use softmax-style normalization
+        sim_start_pos = torch.clamp(sim_start, min=0.0) + 0.1  # add small constant
+        sim_end_pos = torch.clamp(sim_end, min=0.0) + 0.1
+        
+        w_fwd_gt = sim_start_pos / (sim_start_pos + sim_end_pos)
+        w_bwd_gt = 1.0 - w_fwd_gt
+        
+        return w_fwd_gt, w_bwd_gt
 
 # Enable cuDNN benchmarking for faster convolutions
 torch.backends.cudnn.benchmark = True
@@ -497,4 +672,643 @@ class InbetweenTrainer:
                 self.writer.close()
         
         # Final barrier to ensure all processes finish together
+        self.acc.wait_for_everyone()
+
+
+# =============================================================================
+# BIDIRECTIONAL INBETWEENING TRAINER
+# =============================================================================
+# This trainer uses two separate DiT passes (forward continuation + backward
+# continuation) and learns to fuse them via a Cumulative Softmax MLP.
+# =============================================================================
+
+@dataclass
+class BidirectionalTrainConfig:
+    """Configuration for bidirectional inbetweening training."""
+    base_model_path: str
+    data_root: str
+    video_glob: str
+    clip_num_frames: int
+    height: int
+    width: int
+    start_frames: int
+    mid_frames: int
+    end_frames: int
+    cut_annotations_path: str
+    use_cut_focused_sampling: bool
+    cut_focus_prob: float
+    train_batch_size: int
+    gradient_accumulation_steps: int
+    num_train_steps: int
+    learning_rate: float
+    seed: int
+    output_dir: str
+    lora_r: int
+    lora_alpha: int
+    lora_dropout: float
+    transformer_precision: str
+    vae_precision: str
+    # Performance
+    attn_implementation: str = "sdpa"
+    # Logging
+    log_dir: str = "./logs"
+    log_every_n_steps: int = 10
+    # Checkpointing
+    save_every_n_steps: int = 1000
+    resume_from_checkpoint: Optional[str] = None
+    # Fusion MLP settings
+    fusion_hidden_dim: int = 256
+    fusion_num_layers: int = 3
+    pretrained_fusion_mlp_path: Optional[str] = None  # Path to pre-trained fusion MLP weights
+    # Loss weights
+    loss_weight_fwd: float = 1.0
+    loss_weight_bwd: float = 1.0
+    # Sparse generation threshold
+    weight_threshold: float = 0.3  # Only generate fwd/bwd for frames with weight > threshold
+
+
+class BidirectionalInbetweenTrainer:
+    """
+    Trainer for bidirectional inbetweening with fusion.
+    
+    This approach:
+    1. Trains a "forward" LoRA to continue from start frames
+    2. Trains a "backward" LoRA to generate missing beginning for end frames
+    3. Trains a Cumulative Softmax MLP to fuse the two predictions
+    
+    The fusion weights are monotonic: forward contribution decreases while
+    backward contribution increases along the temporal axis.
+    """
+    
+    def __init__(self, cfg: BidirectionalTrainConfig):
+        self.cfg = cfg
+        
+        # Enable cuDNN optimizations
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        
+        self.acc = Accelerator(
+            gradient_accumulation_steps=cfg.gradient_accumulation_steps,
+            mixed_precision="bf16" if cfg.transformer_precision == "bf16" else "fp16"
+        )
+
+        # Load base components
+        self.vae, transformer_base, self.scheduler = load_wan_components(
+            cfg.base_model_path,
+            transformer_precision=cfg.transformer_precision,
+            vae_precision=cfg.vae_precision,
+            attn_implementation=cfg.attn_implementation,
+        )
+
+        # Single LoRA for both forward and backward passes
+        # The same model learns to continue from start AND lead into end
+        self.transformer = add_lora_to_transformer(
+            transformer_base,
+            cfg.lora_r,
+            cfg.lora_alpha,
+            cfg.lora_dropout,
+            cfg.num_train_steps,
+        )
+
+        # Freeze all except LoRA
+        for name, p in self.transformer.named_parameters():
+            p.requires_grad = ("lora_" in name)
+
+        # Get latent channel dimension from VAE config
+        latent_dim = self.vae.config.z_dim
+        
+        # Create fusion MLP
+        self.fusion_mlp = CumulativeSoftmaxFusionMLP(
+            latent_dim=latent_dim,
+            hidden_dim=cfg.fusion_hidden_dim,
+            num_layers=cfg.fusion_num_layers,
+        )
+        
+        # Load pre-trained fusion MLP if provided
+        self.fusion_mlp_frozen = False
+        if cfg.pretrained_fusion_mlp_path:
+            mlp_weights = torch.load(cfg.pretrained_fusion_mlp_path, map_location="cpu")
+            self.fusion_mlp.load_state_dict(mlp_weights)
+            # Freeze MLP parameters
+            for p in self.fusion_mlp.parameters():
+                p.requires_grad = False
+            self.fusion_mlp_frozen = True
+            if self.acc.is_local_main_process:
+                print(f"Loaded pre-trained fusion MLP from {cfg.pretrained_fusion_mlp_path} (frozen)")
+
+        # Collect trainable parameters (only LoRA, MLP is frozen)
+        params_lora = [p for p in self.transformer.parameters() if p.requires_grad]
+        
+        # Create optimizer with LoRA params only (MLP is frozen)
+        self.optim = Lion(params_lora, lr=cfg.learning_rate, weight_decay=1e-5)
+
+        # Dataset
+        dataset = InbetweenVideoDataset(
+            data_root=cfg.data_root,
+            video_glob=cfg.video_glob,
+            clip_num_frames=cfg.clip_num_frames,
+            height=cfg.height,
+            width=cfg.width,
+            start_frames=cfg.start_frames,
+            mid_frames=cfg.mid_frames,
+            end_frames=cfg.end_frames,
+            cut_annotations_path=cfg.cut_annotations_path,
+            use_cut_focused_sampling=cfg.use_cut_focused_sampling,
+            cut_focus_prob=cfg.cut_focus_prob,
+        )
+
+        self.dl = DataLoader(
+            dataset, 
+            batch_size=cfg.train_batch_size, 
+            shuffle=True,
+            num_workers=8,
+            pin_memory=True,
+            prefetch_factor=4,
+            persistent_workers=True
+        )
+
+        # Prepare with accelerator
+        (
+            self.transformer, 
+            self.fusion_mlp,
+            self.optim, 
+            self.dl
+        ) = self.acc.prepare(
+            self.transformer, 
+            self.fusion_mlp,
+            self.optim, 
+            self.dl
+        )
+        
+        # Move VAE to device manually
+        self.vae = self.vae.to(self.acc.device)
+        
+        # Cache unwrapped reference
+        self._unwrapped_transformer = self.acc.unwrap_model(self.transformer)
+
+        # Pre-compute latent normalization tensors
+        self.latents_mean = None
+        self.latents_std = None
+
+        # Log training info
+        if self.acc.is_local_main_process:
+            num_gpus = self.acc.num_processes
+            effective_batch = cfg.train_batch_size * num_gpus * cfg.gradient_accumulation_steps
+            print(f"\n{'='*60}")
+            print("BIDIRECTIONAL INBETWEENING TRAINER (Single LoRA)")
+            print(f"{'='*60}")
+            print(f"Training on {num_gpus} GPU(s)")
+            print(f"  Per-GPU batch size: {cfg.train_batch_size}")
+            print(f"  Gradient accumulation steps: {cfg.gradient_accumulation_steps}")
+            print(f"  Effective batch size: {effective_batch}")
+            print(f"  LoRA params: {sum(p.numel() for p in params_lora):,}")
+            fusion_mlp_params = sum(p.numel() for p in self.fusion_mlp.parameters())
+            print(f"  Fusion MLP params: {fusion_mlp_params:,} ({'frozen' if self.fusion_mlp_frozen else 'trainable'})")
+            print(f"  Attention: {cfg.attn_implementation}")
+            print(f"{'='*60}\n")
+
+        # TensorBoard logging
+        self.writer = None
+        if self.acc.is_local_main_process:
+            log_dir = Path(cfg.log_dir) / "tensorboard_bidirectional"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self.writer = SummaryWriter(log_dir=str(log_dir))
+            print(f"TensorBoard logs → {log_dir}")
+
+        # Checkpoint directory
+        self.checkpoint_dir = Path(cfg.output_dir) / "checkpoints_bidirectional"
+        if self.acc.is_local_main_process:
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        self.global_step = 0
+
+    def _sample_timesteps(self, batch_size: int, device: torch.device, power: float = 0.5) -> torch.Tensor:
+        """Stratified + power-biased timestep sampling."""
+        T = self.scheduler.config.num_train_timesteps
+        u = torch.rand(batch_size, device=device)
+        strata = (torch.arange(batch_size, device=device, dtype=u.dtype) + u) / batch_size
+        if power != 1.0:
+            strata = strata ** power
+        t = strata * T
+        return t
+
+    def save_checkpoint(self, step: int):
+        """Save checkpoint with LoRA and fusion MLP."""
+        if not self.acc.is_local_main_process:
+            return
+
+        checkpoint_path = self.checkpoint_dir / f"checkpoint-{step}"
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+        # Save LoRA (single model for both forward and backward)
+        unwrapped = self.acc.unwrap_model(self.transformer)
+        unwrapped.save_pretrained(checkpoint_path / "lora")
+
+        # Save fusion MLP
+        fusion_mlp_unwrapped = self.acc.unwrap_model(self.fusion_mlp)
+        torch.save(fusion_mlp_unwrapped.state_dict(), checkpoint_path / "fusion_mlp.pt")
+
+        # Save optimizer state
+        torch.save(self.optim.state_dict(), checkpoint_path / "optimizer.pt")
+
+        # Save training state
+        state = {
+            "global_step": step,
+            "config": {
+                "learning_rate": self.cfg.learning_rate,
+                "num_train_steps": self.cfg.num_train_steps,
+                "lora_r": self.cfg.lora_r,
+                "lora_alpha": self.cfg.lora_alpha,
+                "fusion_hidden_dim": self.cfg.fusion_hidden_dim,
+            }
+        }
+        with open(checkpoint_path / "training_state.json", "w") as f:
+            json.dump(state, f, indent=2)
+
+        print(f"Checkpoint saved → {checkpoint_path}")
+        self._cleanup_old_checkpoints(keep=3)
+
+    def _cleanup_old_checkpoints(self, keep: int = 3):
+        """Remove old checkpoints, keeping only the most recent ones."""
+        checkpoints = sorted(
+            self.checkpoint_dir.glob("checkpoint-*"),
+            key=lambda p: int(p.name.split("-")[1])
+        )
+        for ckpt in checkpoints[:-keep]:
+            import shutil
+            shutil.rmtree(ckpt)
+            print(f"Removed old checkpoint: {ckpt}")
+
+    def load_checkpoint(self, checkpoint_path_str: str):
+        """Load checkpoint to resume training."""
+        checkpoint_path = Path(checkpoint_path_str)
+        
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        # Load training state
+        state_file = checkpoint_path / "training_state.json"
+        if state_file.exists():
+            with open(state_file, "r") as f:
+                state = json.load(f)
+            self.global_step = state["global_step"]
+            print(f"Resuming from step {self.global_step}")
+
+        # Load LoRA
+        lora_path = checkpoint_path / "lora"
+        if lora_path.exists():
+            unwrapped = self.acc.unwrap_model(self.transformer)
+            unwrapped.load_adapter(str(lora_path), adapter_name="default")
+            print(f"Loaded LoRA from {lora_path}")
+
+        # Load fusion MLP
+        fusion_path = checkpoint_path / "fusion_mlp.pt"
+        if fusion_path.exists():
+            fusion_state = torch.load(fusion_path, map_location=self.acc.device)
+            fusion_mlp_unwrapped = self.acc.unwrap_model(self.fusion_mlp)
+            fusion_mlp_unwrapped.load_state_dict(fusion_state)
+            print(f"Loaded fusion MLP from {fusion_path}")
+
+        # Load optimizer state
+        optim_path = checkpoint_path / "optimizer.pt"
+        if optim_path.exists():
+            optim_state = torch.load(optim_path, map_location=self.acc.device)
+            self.optim.load_state_dict(optim_state)
+            print(f"Loaded optimizer state from {optim_path}")
+
+    def get_latest_checkpoint(self) -> Optional[Path]:
+        """Find the latest checkpoint."""
+        if not self.checkpoint_dir.exists():
+            return None
+        checkpoints = list(self.checkpoint_dir.glob("checkpoint-*"))
+        if not checkpoints:
+            return None
+        return max(checkpoints, key=lambda p: int(p.name.split("-")[1]))
+
+    def train(self):
+        """
+        Main training loop for bidirectional inbetweening with sparse generation.
+        
+        Training procedure:
+        1. Encode video segments (start, mid, end) to latents
+        2. Predict fusion weights from start/end latents via MLP
+        3. Compute GT weights from latent similarity (mid to start/end)
+        4. Train fusion MLP with weight prediction loss
+        5. Only generate fwd/bwd for frames where weight > threshold (sparse)
+        6. Compute velocity losses for generated frames
+        
+        Note: Single LoRA is used for both forward and backward passes.
+        """
+        device = self.acc.device
+        self.transformer.train()
+        self.fusion_mlp.train()
+        self.vae.eval()
+
+        # Resume from checkpoint if specified
+        if self.cfg.resume_from_checkpoint:
+            if self.cfg.resume_from_checkpoint == "latest":
+                latest = self.get_latest_checkpoint()
+                if latest:
+                    self.load_checkpoint(str(latest))
+                else:
+                    print("No checkpoint found, starting from scratch")
+            else:
+                self.load_checkpoint(self.cfg.resume_from_checkpoint)
+
+        step = self.global_step
+        remaining_steps = self.cfg.num_train_steps - step
+        
+        if remaining_steps <= 0:
+            print(f"Training already completed ({step}/{self.cfg.num_train_steps} steps)")
+            return
+
+        pbar = tqdm(
+            total=self.cfg.num_train_steps,
+            initial=step,
+            disable=not self.acc.is_local_main_process,
+            desc="Bidirectional Training"
+        )
+
+        # Loss tracking
+        running_losses = {"total": 0.0, "fwd": 0.0, "bwd": 0.0, "weight": 0.0}
+        running_stats = {"fwd_frames": 0.0, "bwd_frames": 0.0}
+        loss_count = 0
+        
+        # Weight threshold for sparse generation
+        threshold = self.cfg.weight_threshold
+
+        while step < self.cfg.num_train_steps:
+            for batch in self.dl:
+                with self.acc.accumulate(self.transformer, self.fusion_mlp):
+                    # Video: [B, T, C, H, W] -> [B, C, T, H, W]
+                    video = batch["video"].to(device, non_blocking=True)
+                    video = video.permute(0, 2, 1, 3, 4)
+                    B = video.shape[0]
+
+                    # Split video
+                    s_frames = self.cfg.start_frames
+                    m_frames = self.cfg.mid_frames
+                    e_frames = self.cfg.end_frames
+                    
+                    video_start = video[:, :, :s_frames]
+                    video_mid = video[:, :, s_frames:s_frames+m_frames]
+                    video_end = video[:, :, s_frames+m_frames:]
+
+                    # Encode segments to latents
+                    with torch.no_grad():
+                        enc_start = self.vae.encode(video_start)
+                        start_lat = retrieve_latents(enc_start)
+                        
+                        enc_mid = self.vae.encode(video_mid)
+                        mid_lat = retrieve_latents(enc_mid)
+                        
+                        enc_end = self.vae.encode(video_end)
+                        end_lat = retrieve_latents(enc_end)
+                        
+                        # Convert to transformer dtype
+                        start_lat = start_lat.to(self._unwrapped_transformer.dtype)
+                        mid_lat = mid_lat.to(self._unwrapped_transformer.dtype)
+                        end_lat = end_lat.to(self._unwrapped_transformer.dtype)
+
+                        # Normalize latents
+                        if self.latents_mean is None:
+                            self.latents_mean = torch.tensor(
+                                self.vae.config.latents_mean,
+                                device=start_lat.device,
+                                dtype=start_lat.dtype,
+                            ).view(1, self.vae.config.z_dim, 1, 1, 1)
+                            self.latents_std = 1.0 / torch.tensor(
+                                self.vae.config.latents_std,
+                                device=start_lat.device,
+                                dtype=start_lat.dtype,
+                            ).view(1, self.vae.config.z_dim, 1, 1, 1)
+                        
+                        start_lat = (start_lat - self.latents_mean) * self.latents_std
+                        mid_lat = (mid_lat - self.latents_mean) * self.latents_std
+                        end_lat = (end_lat - self.latents_mean) * self.latents_std
+
+                    # Get latent dimensions
+                    _, C, T_start_lat, H, W = start_lat.shape
+                    _, _, T_mid_lat, _, _ = mid_lat.shape
+                    _, _, T_end_lat, _, _ = end_lat.shape
+
+                    # =========================================================
+                    # STEP 1: Predict fusion weights from start/end latents
+                    # =========================================================
+                    w_fwd_pred, w_bwd_pred = self.fusion_mlp(start_lat, end_lat, T_mid_lat)
+                    # w_fwd_pred, w_bwd_pred: [B, T_mid_lat]
+                    
+                    # =========================================================
+                    # STEP 2: Compute GT weights from latent similarity
+                    # =========================================================
+                    with torch.no_grad():
+                        w_fwd_gt, w_bwd_gt = CumulativeSoftmaxFusionMLP.compute_gt_weights_from_similarity(
+                            mid_lat, start_lat, end_lat
+                        )
+                    
+                    # =========================================================
+                    # STEP 3: Weight prediction loss (trains fusion MLP)
+                    # =========================================================
+                    loss_weight = torch.nn.functional.mse_loss(w_fwd_pred, w_fwd_gt)
+                    
+                    # =========================================================
+                    # STEP 4: Determine which frames to generate for each model
+                    # Forward model: generate frames where w_fwd > threshold
+                    # Backward model: generate frames where w_bwd > threshold
+                    # =========================================================
+                    # Use predicted weights (detached) for masking
+                    w_fwd_detached = w_fwd_pred.detach()
+                    w_bwd_detached = w_bwd_pred.detach()
+                    
+                    # Mask per frame: [B, T_mid_lat]
+                    fwd_mask = w_fwd_detached > threshold  # frames where forward should contribute
+                    bwd_mask = w_bwd_detached > threshold  # frames where backward should contribute
+                    
+                    # Track statistics
+                    num_fwd_frames = fwd_mask.float().sum().item()
+                    num_bwd_frames = bwd_mask.float().sum().item()
+                    
+                    # Sample timestep and add noise to mid
+                    noise = torch.randn_like(mid_lat)
+                    t = self._sample_timesteps(B, device, power=0.5)
+                    t_normalized = t.view(B, 1, 1, 1, 1) / self.scheduler.config.num_train_timesteps
+                    noisy_mid = (1 - t_normalized) * mid_lat + t_normalized * noise
+
+                    # Dummy text embeddings
+                    enc_state = torch.zeros(
+                        B, 1, self._unwrapped_transformer.config.text_dim,
+                        device=device,
+                        dtype=self._unwrapped_transformer.dtype,
+                    )
+
+                    # Flow matching target: velocity = noise - x_0
+                    target = noise - mid_lat
+
+                    # Initialize losses
+                    loss_fwd = torch.tensor(0.0, device=device)
+                    loss_bwd = torch.tensor(0.0, device=device)
+
+                    # =========================================================
+                    # STEP 5: Forward pass (only if any frame needs it)
+                    # Uses same LoRA with [start, noisy_mid] input
+                    # =========================================================
+                    if fwd_mask.any():
+                        latents_fwd = torch.cat([start_lat, noisy_mid], dim=2)
+                        T_fwd = T_start_lat + T_mid_lat
+                        
+                        # Mask: start is conditioning, mid is noisy
+                        mask_fwd = torch.zeros(B, T_fwd, device=device, dtype=torch.bool)
+                        mask_fwd[:, :T_start_lat] = True
+
+                        pred_fwd = self.transformer(
+                            hidden_states=latents_fwd,
+                            timestep=t,
+                            encoder_hidden_states=enc_state,
+                            conditioning_mask=mask_fwd,
+                            return_dict=True,
+                        ).sample
+
+                        # Extract mid prediction: [B, C, T_mid_lat, H, W]
+                        pred_mid_fwd = pred_fwd[:, :, T_start_lat:]
+                        
+                        # Compute weighted loss only for frames where w_fwd > threshold
+                        # Weight by the actual predicted weight (higher weight = more responsibility)
+                        fwd_weights = w_fwd_detached.view(B, 1, T_mid_lat, 1, 1)
+                        fwd_mask_5d = fwd_mask.view(B, 1, T_mid_lat, 1, 1).float()
+                        
+                        fwd_sq_error = (pred_mid_fwd.float() - target.float()) ** 2
+                        # Only compute loss for masked frames, weighted by their predicted weight
+                        loss_fwd = (fwd_sq_error * fwd_weights * fwd_mask_5d).sum() / (fwd_mask_5d.sum() + 1e-8)
+
+                    # =========================================================
+                    # STEP 6: Backward pass (only if any frame needs it)
+                    # Uses same LoRA with [noisy_mid, end] input
+                    # =========================================================
+                    if bwd_mask.any():
+                        latents_bwd = torch.cat([noisy_mid, end_lat], dim=2)
+                        T_bwd = T_mid_lat + T_end_lat
+                        
+                        # Mask: end frames are conditioning
+                        mask_bwd = torch.zeros(B, T_bwd, device=device, dtype=torch.bool)
+                        mask_bwd[:, T_mid_lat:] = True
+
+                        pred_bwd_full = self.transformer(
+                            hidden_states=latents_bwd,
+                            timestep=t,
+                            encoder_hidden_states=enc_state,
+                            conditioning_mask=mask_bwd,
+                            return_dict=True,
+                        ).sample
+
+                        # Extract mid prediction: [B, C, T_mid_lat, H, W]
+                        pred_mid_bwd = pred_bwd_full[:, :, :T_mid_lat]
+                        
+                        # Compute weighted loss only for frames where w_bwd > threshold
+                        bwd_weights = w_bwd_detached.view(B, 1, T_mid_lat, 1, 1)
+                        bwd_mask_5d = bwd_mask.view(B, 1, T_mid_lat, 1, 1).float()
+                        
+                        bwd_sq_error = (pred_mid_bwd.float() - target.float()) ** 2
+                        loss_bwd = (bwd_sq_error * bwd_weights * bwd_mask_5d).sum() / (bwd_mask_5d.sum() + 1e-8)
+
+                    # =========================================================
+                    # STEP 7: Backward passes (MLP is frozen, only train LoRA)
+                    # =========================================================
+                    # loss_fwd -> transformer LoRA (if computed)
+                    if fwd_mask.any():
+                        self.acc.backward(self.cfg.loss_weight_fwd * loss_fwd, retain_graph=bwd_mask.any())
+                    
+                    # loss_bwd -> transformer LoRA (if computed)
+                    if bwd_mask.any():
+                        self.acc.backward(self.cfg.loss_weight_bwd * loss_bwd)
+
+                    self.optim.step()
+                    self.optim.zero_grad()
+
+                    # Total loss for logging
+                    loss = (
+                        self.cfg.loss_weight_fwd * loss_fwd +
+                        self.cfg.loss_weight_bwd * loss_bwd
+                    )
+
+                    step += 1
+                    pbar.update(1)
+
+                    # Track losses
+                    running_losses["total"] += loss.detach().item()
+                    running_losses["fwd"] += loss_fwd.detach().item()
+                    running_losses["bwd"] += loss_bwd.detach().item()
+                    running_losses["weight"] += loss_weight.detach().item()
+                    running_stats["fwd_frames"] += num_fwd_frames
+                    running_stats["bwd_frames"] += num_bwd_frames
+                    loss_count += 1
+
+                    # TensorBoard logging
+                    if self.writer and step % self.cfg.log_every_n_steps == 0:
+                        if self.acc.is_local_main_process:
+                            avg_total = running_losses["total"] / loss_count
+                            avg_fwd = running_losses["fwd"] / loss_count
+                            avg_bwd = running_losses["bwd"] / loss_count
+                            avg_weight = running_losses["weight"] / loss_count
+                            avg_fwd_frames = running_stats["fwd_frames"] / loss_count
+                            avg_bwd_frames = running_stats["bwd_frames"] / loss_count
+                            
+                            self.writer.add_scalar("train/loss_total", avg_total, step)
+                            self.writer.add_scalar("train/loss_forward", avg_fwd, step)
+                            self.writer.add_scalar("train/loss_backward", avg_bwd, step)
+                            self.writer.add_scalar("train/loss_weight", avg_weight, step)
+                            self.writer.add_scalar("train/timestep_mean", t.mean().item(), step)
+                            
+                            # Log sparsity statistics
+                            self.writer.add_scalar("train/avg_fwd_frames", avg_fwd_frames, step)
+                            self.writer.add_scalar("train/avg_bwd_frames", avg_bwd_frames, step)
+                            
+                            # Log weight prediction quality
+                            w_fwd_mean = w_fwd_pred.mean().item()
+                            w_bwd_mean = w_bwd_pred.mean().item()
+                            self.writer.add_scalar("train/w_fwd_pred_mean", w_fwd_mean, step)
+                            self.writer.add_scalar("train/w_bwd_pred_mean", w_bwd_mean, step)
+                            
+                            pbar.set_postfix({
+                                "loss": f"{avg_total:.4f}",
+                                "fwd": f"{avg_fwd:.4f}",
+                                "bwd": f"{avg_bwd:.4f}",
+                                "w": f"{avg_weight:.4f}",
+                            })
+                        
+                        running_losses = {k: 0.0 for k in running_losses}
+                        running_stats = {k: 0.0 for k in running_stats}
+                        loss_count = 0
+
+                    # Save checkpoint periodically
+                    if step % self.cfg.save_every_n_steps == 0:
+                        self.acc.wait_for_everyone()
+                        self.save_checkpoint(step)
+
+                    if step >= self.cfg.num_train_steps:
+                        break
+        
+        self.global_step = step
+        pbar.close()
+
+        # Final save
+        self.acc.wait_for_everyone()
+        
+        if self.acc.is_local_main_process:
+            self.save_checkpoint(step)
+            
+            # Save final models
+            output_path = Path(self.cfg.output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            self.acc.unwrap_model(self.transformer).save_pretrained(output_path / "lora")
+            torch.save(
+                self.acc.unwrap_model(self.fusion_mlp).state_dict(), 
+                output_path / "fusion_mlp.pt"
+            )
+            print(f"Saved final models → {output_path}")
+
+            if self.writer:
+                self.writer.close()
+        
         self.acc.wait_for_everyone()

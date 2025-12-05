@@ -1,0 +1,106 @@
+# ============================
+# Wan2.2 Bidirectional LoRA Inbetweening Config
+# ============================
+# This config is for the BidirectionalInbetweenTrainer which uses:
+# - Single LoRA for both forward and backward passes
+# - A pre-trained Cumulative Softmax MLP for monotonic fusion (frozen)
+#
+# Training flow:
+# 1. First train the fusion MLP separately (see fusion_mlp_config.yaml)
+# 2. Then train the bidirectional LoRA with the frozen MLP
+# ============================
+
+# -------- Model --------
+base_model_path: "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+
+# Precision:
+# - transformer_precision: "bf16" or "fp16" or "no"
+# - vae_precision: "fp32" (recommended) or "fp16"
+transformer_precision: "bf16"
+vae_precision: "fp32"
+
+# Attention implementation:
+# - "flash_attention_2": Fastest (requires: pip install flash-attn)
+# - "sdpa": PyTorch native scaled_dot_product_attention (default, good speed)
+# - "eager": Slowest, most compatible
+attn_implementation: "sdpa"
+
+# -------- Data --------
+data_root: "/home/tjiao/cv_proj/dep/clipshots/videos/ClipShots_extracted/ClipShots/videos/train"
+video_glob: "**/*.mp4"        # glob under data_root
+
+# Number of raw frames per training sample (before VAE downsampling)
+clip_num_frames: 120          # for 30 + 60 + 30
+
+resolution:
+  height: 384                 # training resolution (must be divisible by 16)
+  width: 672
+
+# Inbetween split in raw frame counts (used proportionally in latent space)
+start_frames: 30
+mid_frames: 60
+end_frames: 30
+
+# Hard-cut annotations (JSON: { "video_name.mp4": [cut_idx1, cut_idx2, ...], ... })
+cut_annotations_path: "/home/tjiao/cv_proj/dep/clipshots/annotations/train_middle_frames.json"
+
+# If true, the dataset tries to sample windows centered around annotated cuts
+use_cut_focused_sampling: true
+
+# Probability that a given sample is cut-focused; otherwise random window
+cut_focus_prob: 0.66
+
+
+# -------- Training --------
+train_batch_size: 1
+gradient_accumulation_steps: 32
+
+num_train_steps: 10000
+learning_rate: 1.0e-4
+seed: 68
+
+output_dir: "./outputs/bidirectional_inbetween_lora"
+
+# LoRA config (single LoRA for both forward and backward)
+lora_r: 128
+lora_alpha: 256
+lora_dropout: 0
+
+# -------- Fusion MLP (Pre-trained, Frozen) --------
+# Path to the pre-trained fusion MLP weights
+# Train this first using train_fusion_mlp.py with fusion_mlp_config.yaml
+pretrained_fusion_mlp_path: "./outputs/fusion_mlp/fusion_mlp_final.pt"
+
+# MLP architecture (must match the pre-trained model)
+fusion_hidden_dim: 256
+fusion_num_layers: 3
+
+# -------- Loss Weights --------
+# loss_fwd: supervises LoRA on forward pass (only on frames where w_fwd > threshold)
+# loss_bwd: supervises LoRA on backward pass (only on frames where w_bwd > threshold)
+loss_weight_fwd: 1.0
+loss_weight_bwd: 1.0
+
+# -------- Sparse Generation --------
+# Only run forward/backward DiT for frames where their weight > threshold
+# This saves compute by not generating frames where the model has low responsibility
+weight_threshold: 0.3
+
+# -------- Logging --------
+log_dir: "./logs"
+log_every_n_steps: 10
+
+# -------- Checkpointing --------
+save_every_n_steps: 200
+resume_from_checkpoint: "latest"
+
+# -------- Inference Defaults (for convenience) --------
+inference:
+  height: 480            # higher than training res is OK (must be divisible by 16)
+  width: 832
+  start_frames: 30
+  mid_frames: 60
+  end_frames: 30
+  num_inference_steps: 50
+  out_fps: 24
+  output_path: "./outputs/bidirectional_inbetween_output.mp4"

@@ -1,0 +1,52 @@
+# ============================
+# Fusion MLP Training Config
+# ============================
+# This config is for training the Cumulative Softmax Fusion MLP separately.
+# The trained MLP can then be used by the bidirectional inbetweening trainer.
+# ============================
+
+# -------- Model --------
+# Only VAE is needed (transformer not used for MLP training)
+base_model_path: "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+vae_precision: "fp32"
+
+# -------- Data --------
+data_root: "/home/tjiao/cv_proj/dep/clipshots/videos/ClipShots_extracted/ClipShots/videos/train"
+video_glob: "**/*.mp4"
+
+clip_num_frames: 120
+
+resolution:
+  height: 384
+  width: 672
+
+start_frames: 30
+mid_frames: 60
+end_frames: 30
+
+cut_annotations_path: "/home/tjiao/cv_proj/dep/clipshots/annotations/train_middle_frames.json"
+use_cut_focused_sampling: true
+cut_focus_prob: 0.66
+
+# -------- Training --------
+# MLP trains much faster than LoRA, can use larger batch sizes
+train_batch_size: 4
+gradient_accumulation_steps: 8
+
+num_train_steps: 5000
+learning_rate: 1.0e-4
+seed: 68
+
+output_dir: "./outputs/fusion_mlp"
+
+# -------- Fusion MLP --------
+fusion_hidden_dim: 256
+fusion_num_layers: 3
+
+# -------- Logging --------
+log_dir: "./logs"
+log_every_n_steps: 10
+
+# -------- Checkpointing --------
+save_every_n_steps: 500
+resume_from_checkpoint: null
