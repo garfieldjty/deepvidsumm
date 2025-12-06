@@ -4,7 +4,7 @@ Inference script for video inbetweening.
 
 Supports both:
 - Standard (unidirectional) model: uses --lora_path only
-- Bidirectional model: uses --lora_fwd_path + --lora_bwd_path + --fusion_mlp_path
+- Bidirectional model: uses --lora_fwd_path + --lora_bwd_path + --fusion_net_path
 
 Examples:
     # Standard model
@@ -16,7 +16,7 @@ Examples:
     python -m src.run_inference_inbetween \\
         --lora_fwd_path ./outputs/bidirectional_lora/lora_fwd \\
         --lora_bwd_path ./outputs/bidirectional_lora/lora_bwd \\
-        --fusion_mlp_path ./outputs/bidirectional_lora/fusion_mlp.pt \\
+        --fusion_net_path ./outputs/bidirectional_lora/fusion_net.pt \\
         --start_video_path video.mp4 --start_frame_index 0 --start_duration 30 \\
         --end_video_path video.mp4 --end_frame_index 90 --end_duration 30
 """
@@ -65,10 +65,10 @@ def main():
     
     # Bidirectional model parameters
     parser.add_argument(
-        "--fusion_mlp_path", 
+        "--fusion_net_path", 
         type=str, 
         default=None,
-        help="Path to fusion MLP weights (enables bidirectional mode)"
+        help="Path to fusion network weights (enables bidirectional mode)"
     )
     parser.add_argument(
         "--attn_implementation",
@@ -81,19 +81,19 @@ def main():
         "--fusion_hidden_dim",
         type=int,
         default=256,
-        help="Hidden dimension of fusion MLP (if bidirectional)",
+        help="Hidden dimension of fusion network (if bidirectional)",
     )
     parser.add_argument(
         "--fusion_num_layers",
         type=int,
         default=3,
-        help="Number of layers in fusion MLP (if bidirectional)",
+        help="Number of layers in fusion network (if bidirectional)",
     )
     parser.add_argument(
         "--cnn_feature_dim",
         type=int,
         default=64,
-        help="CNN feature dimension in fusion MLP (if bidirectional)",
+        help="CNN feature dimension in fusion network (if bidirectional)",
     )
 
     args = parser.parse_args()
@@ -101,13 +101,13 @@ def main():
     # Initialize accelerator for distributed inference support
     accelerator = Accelerator()
     
-    # Check if using bidirectional mode (requires both lora_fwd_path and lora_bwd_path, plus fusion_mlp_path)
-    use_bidirectional = args.fusion_mlp_path is not None
+    # Check if using bidirectional mode (requires both lora_fwd_path and lora_bwd_path, plus fusion_net_path)
+    use_bidirectional = args.fusion_net_path is not None
     
     # Validate LoRA paths based on mode
     if use_bidirectional:
         if args.lora_fwd_path is None or args.lora_bwd_path is None:
-            raise ValueError("Bidirectional mode (--fusion_mlp_path set) requires both --lora_fwd_path and --lora_bwd_path")
+            raise ValueError("Bidirectional mode (--fusion_net_path set) requires both --lora_fwd_path and --lora_bwd_path")
     else:
         if args.lora_path is None:
             raise ValueError("Standard mode requires --lora_path")
@@ -153,7 +153,7 @@ def main():
         if use_bidirectional:
             print(f"LoRA forward: {args.lora_fwd_path}")
             print(f"LoRA backward: {args.lora_bwd_path}")
-            print(f"Fusion MLP: {args.fusion_mlp_path}")
+            print(f"Fusion Network: {args.fusion_net_path}")
         else:
             print(f"LoRA path: {args.lora_path}")
         print(f"Start video: {args.start_video_path} (frame {args.start_frame_index}, duration {args.start_duration})")
@@ -169,7 +169,7 @@ def main():
             base_model_path=base_model_path,
             lora_fwd_path=args.lora_fwd_path,
             lora_bwd_path=args.lora_bwd_path,
-            fusion_mlp_path=args.fusion_mlp_path,
+            fusion_net_path=args.fusion_net_path,
             start_video_path=args.start_video_path,
             start_frame_index=args.start_frame_index,
             start_duration=args.start_duration,

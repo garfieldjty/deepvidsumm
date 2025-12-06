@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import os
 import copy
+import shutil
 
 import torch
 import torch.nn as nn
@@ -17,9 +18,9 @@ from .models import load_wan_components, add_lora_to_transformer
 from .dataset import InbetweenVideoDataset
 
 
-class CumulativeSoftmaxFusionMLP(nn.Module):
+class CumulativeSoftmaxFusionNet(nn.Module):
     """
-    MLP that produces per-frame fusion weights using Cumulative Softmax.
+    CNN+FC network that produces per-frame fusion weights using Cumulative Softmax.
     
     The Cumulative Softmax ensures monotonic blending weights that smoothly
     transition from forward-generated frames (early) to backward-generated 
@@ -33,7 +34,7 @@ class CumulativeSoftmaxFusionMLP(nn.Module):
     Uses CNN-based spatial downscaling instead of aggressive global pooling
     to preserve more spatial information for better weight prediction.
     
-    The MLP is trained by comparing predicted weights against ground-truth
+    The network is trained by comparing predicted weights against ground-truth
     latent similarity patterns (how similar each mid frame is to start vs end).
     """
     
@@ -74,7 +75,7 @@ class CumulativeSoftmaxFusionMLP(nn.Module):
             nn.SiLU(),
         )
         
-        # Input to MLP: [start_features, end_features, position_encoding]
+        # Input to FC layers: [start_features, end_features, position_encoding]
         # start/end features: cnn_feature_dim each
         # position encoding: cnn_feature_dim (to match feature dimensions)
         input_dim = cnn_feature_dim * 3
@@ -88,7 +89,7 @@ class CumulativeSoftmaxFusionMLP(nn.Module):
         # Output: logits for cumulative softmax (one per frame)
         layers.append(nn.Linear(hidden_dim, 1))
         
-        self.mlp = nn.Sequential(*layers)
+        self.fc_layers = nn.Sequential(*layers)
         
         # Pre-compute position encoding frequencies
         # Use cnn_feature_dim for position encoding to match CNN features
@@ -157,11 +158,11 @@ class CumulativeSoftmaxFusionMLP(nn.Module):
         # Concatenate features: [B, T_mid, 3 * cnn_feature_dim]
         feat = torch.cat([start_features_exp, end_features_exp, pos_enc], dim=-1)
         
-        # Reshape for batch MLP: [B * T_mid, 3 * cnn_feature_dim]
+        # Reshape for batch FC: [B * T_mid, 3 * cnn_feature_dim]
         feat_flat = feat.view(B * T_mid, -1)
         
-        # MLP forward: [B * T_mid, 1]
-        logits_flat = self.mlp(feat_flat)
+        # FC forward: [B * T_mid, 1]
+        logits_flat = self.fc_layers(feat_flat)
         
         # Reshape back: [B, T_mid]
         logits = logits_flat.view(B, T_mid)
@@ -292,7 +293,6 @@ class InbetweenTrainer:
             cfg.lora_r,
             cfg.lora_alpha,
             cfg.lora_dropout,
-            cfg.num_train_steps,
         )
 
         # Freeze all except LoRA
@@ -441,7 +441,6 @@ class InbetweenTrainer:
             key=lambda p: int(p.name.split("-")[1])
         )
         for ckpt in checkpoints[:-keep]:
-            import shutil
             shutil.rmtree(ckpt)
             print(f"Removed old checkpoint: {ckpt}")
 
@@ -463,7 +462,6 @@ class InbetweenTrainer:
         # Load LoRA weights
         lora_path = checkpoint_path / "lora"
         if lora_path.exists():
-            from peft import PeftModel
             # The transformer already has LoRA, we need to load the weights
             unwrapped = self.acc.unwrap_model(self.transformer)
             unwrapped.load_adapter(str(lora_path), adapter_name="default")
@@ -711,7 +709,7 @@ class InbetweenTrainer:
 # BIDIRECTIONAL INBETWEENING TRAINER
 # =============================================================================
 # This trainer uses two separate DiT passes (forward continuation + backward
-# continuation) and learns to fuse them via a Cumulative Softmax MLP.
+# continuation) and learns to fuse them via a Cumulative Softmax Fusion Network.
 # =============================================================================
 
 @dataclass
@@ -748,11 +746,11 @@ class BidirectionalTrainConfig:
     # Checkpointing
     save_every_n_steps: int = 1000
     resume_from_checkpoint: Optional[str] = None
-    # Fusion MLP settings
+    # Fusion Network settings
     fusion_hidden_dim: int = 256
     fusion_num_layers: int = 3
     cnn_feature_dim: int = 64  # Output feature dim from CNN spatial encoder
-    pretrained_fusion_mlp_path: Optional[str] = None  # Path to pre-trained fusion MLP weights
+    pretrained_fusion_net_path: Optional[str] = None  # Path to pre-trained fusion network weights
     # Alternating training settings
     alternating_steps: int = 200  # Train each LoRA for this many steps before switching
 
@@ -764,7 +762,7 @@ class BidirectionalInbetweenTrainer:
     This approach:
     1. Trains a "forward" LoRA to continue from start frames
     2. Trains a "backward" LoRA to generate missing beginning for end frames
-    3. Uses a pre-trained Cumulative Softmax MLP to fuse the two predictions at inference
+    3. Uses a pre-trained Cumulative Softmax Fusion Network to fuse the two predictions at inference
     
     Training alternates between the two LoRAs every N steps to avoid gradient conflicts.
     """
@@ -796,7 +794,6 @@ class BidirectionalInbetweenTrainer:
             cfg.lora_r,
             cfg.lora_alpha,
             cfg.lora_dropout,
-            cfg.num_train_steps,
         )
         
         # Create a fresh copy of the base transformer for backward LoRA
@@ -814,7 +811,6 @@ class BidirectionalInbetweenTrainer:
             cfg.lora_r,
             cfg.lora_alpha,
             cfg.lora_dropout,
-            cfg.num_train_steps,
         )
 
         # Freeze all except LoRA for both transformers
@@ -826,25 +822,25 @@ class BidirectionalInbetweenTrainer:
         # Get latent channel dimension from VAE config
         latent_dim = self.vae.config.z_dim
         
-        # Create fusion MLP with CNN spatial encoder
-        self.fusion_mlp = CumulativeSoftmaxFusionMLP(
+        # Create fusion network with CNN spatial encoder
+        self.fusion_net = CumulativeSoftmaxFusionNet(
             latent_dim=latent_dim,
             hidden_dim=cfg.fusion_hidden_dim,
             num_layers=cfg.fusion_num_layers,
             cnn_feature_dim=cfg.cnn_feature_dim,
         )
         
-        # Load pre-trained fusion MLP if provided
-        self.fusion_mlp_frozen = False
-        if cfg.pretrained_fusion_mlp_path:
-            mlp_weights = torch.load(cfg.pretrained_fusion_mlp_path, map_location="cpu")
-            self.fusion_mlp.load_state_dict(mlp_weights)
-            # Freeze MLP parameters
-            for p in self.fusion_mlp.parameters():
+        # Load pre-trained fusion network if provided
+        self.fusion_net_frozen = False
+        if cfg.pretrained_fusion_net_path:
+            net_weights = torch.load(cfg.pretrained_fusion_net_path, map_location="cpu")
+            self.fusion_net.load_state_dict(net_weights)
+            # Freeze network parameters
+            for p in self.fusion_net.parameters():
                 p.requires_grad = False
-            self.fusion_mlp_frozen = True
+            self.fusion_net_frozen = True
             if self.acc.is_local_main_process:
-                print(f"Loaded pre-trained fusion MLP from {cfg.pretrained_fusion_mlp_path} (frozen)")
+                print(f"Loaded pre-trained fusion network from {cfg.pretrained_fusion_net_path} (frozen)")
 
         # Collect trainable parameters for each LoRA
         params_fwd = [p for p in self.transformer_fwd.parameters() if p.requires_grad]
@@ -883,14 +879,14 @@ class BidirectionalInbetweenTrainer:
         (
             self.transformer_fwd,
             self.transformer_bwd,
-            self.fusion_mlp,
+            self.fusion_net,
             self.optim_fwd,
             self.optim_bwd,
             self.dl
         ) = self.acc.prepare(
             self.transformer_fwd,
             self.transformer_bwd,
-            self.fusion_mlp,
+            self.fusion_net,
             self.optim_fwd,
             self.optim_bwd,
             self.dl
@@ -920,8 +916,8 @@ class BidirectionalInbetweenTrainer:
             print(f"  Effective batch size: {effective_batch}")
             print(f"  Forward LoRA params: {sum(p.numel() for p in params_fwd):,}")
             print(f"  Backward LoRA params: {sum(p.numel() for p in params_bwd):,}")
-            fusion_mlp_params = sum(p.numel() for p in self.fusion_mlp.parameters())
-            print(f"  Fusion MLP params: {fusion_mlp_params:,} ({'frozen' if self.fusion_mlp_frozen else 'trainable'})")
+            fusion_net_params = sum(p.numel() for p in self.fusion_net.parameters())
+            print(f"  Fusion Network params: {fusion_net_params:,} ({'frozen' if self.fusion_net_frozen else 'trainable'})")
             print(f"  Alternating every: {cfg.alternating_steps} steps")
             print(f"  Attention: {cfg.attn_implementation}")
             print(f"{'='*60}\n")
@@ -952,7 +948,7 @@ class BidirectionalInbetweenTrainer:
         return t
 
     def save_checkpoint(self, step: int):
-        """Save checkpoint with both LoRAs and fusion MLP."""
+        """Save checkpoint with both LoRAs and fusion network."""
         if not self.acc.is_local_main_process:
             return
 
@@ -967,9 +963,9 @@ class BidirectionalInbetweenTrainer:
         unwrapped_bwd = self.acc.unwrap_model(self.transformer_bwd)
         unwrapped_bwd.save_pretrained(checkpoint_path / "lora_bwd")
 
-        # Save fusion MLP
-        fusion_mlp_unwrapped = self.acc.unwrap_model(self.fusion_mlp)
-        torch.save(fusion_mlp_unwrapped.state_dict(), checkpoint_path / "fusion_mlp.pt")
+        # Save fusion network
+        fusion_net_unwrapped = self.acc.unwrap_model(self.fusion_net)
+        torch.save(fusion_net_unwrapped.state_dict(), checkpoint_path / "fusion_net.pt")
 
         # Save optimizer states
         torch.save(self.optim_fwd.state_dict(), checkpoint_path / "optimizer_fwd.pt")
@@ -1000,7 +996,6 @@ class BidirectionalInbetweenTrainer:
             key=lambda p: int(p.name.split("-")[1])
         )
         for ckpt in checkpoints[:-keep]:
-            import shutil
             shutil.rmtree(ckpt)
             print(f"Removed old checkpoint: {ckpt}")
 
@@ -1033,13 +1028,13 @@ class BidirectionalInbetweenTrainer:
             unwrapped_bwd.load_adapter(str(lora_bwd_path), adapter_name="default")
             print(f"Loaded backward LoRA from {lora_bwd_path}")
 
-        # Load fusion MLP
-        fusion_path = checkpoint_path / "fusion_mlp.pt"
+        # Load fusion network
+        fusion_path = checkpoint_path / "fusion_net.pt"
         if fusion_path.exists():
             fusion_state = torch.load(fusion_path, map_location=self.acc.device)
-            fusion_mlp_unwrapped = self.acc.unwrap_model(self.fusion_mlp)
-            fusion_mlp_unwrapped.load_state_dict(fusion_state)
-            print(f"Loaded fusion MLP from {fusion_path}")
+            fusion_net_unwrapped = self.acc.unwrap_model(self.fusion_net)
+            fusion_net_unwrapped.load_state_dict(fusion_state)
+            print(f"Loaded fusion network from {fusion_path}")
 
         # Load optimizer states
         optim_fwd_path = checkpoint_path / "optimizer_fwd.pt"
@@ -1341,8 +1336,8 @@ class BidirectionalInbetweenTrainer:
             self.acc.unwrap_model(self.transformer_fwd).save_pretrained(output_path / "lora_fwd")
             self.acc.unwrap_model(self.transformer_bwd).save_pretrained(output_path / "lora_bwd")
             torch.save(
-                self.acc.unwrap_model(self.fusion_mlp).state_dict(), 
-                output_path / "fusion_mlp.pt"
+                self.acc.unwrap_model(self.fusion_net).state_dict(), 
+                output_path / "fusion_net.pt"
             )
             print(f"Saved final models → {output_path}")
 

@@ -15,7 +15,7 @@ from .base import VisualAnalyzerBase
 logger = logging.getLogger(__name__)
 
 
-class OpenRouterRangeAnalyzer(VisualAnalyzerBase):
+class OpenRouterVideoAnalyzer(VisualAnalyzerBase):
     """
     Vision language model caller that asks for answer-aligned time ranges.
     Raises on failure; caller can decide how to handle errors.
@@ -26,10 +26,10 @@ class OpenRouterRangeAnalyzer(VisualAnalyzerBase):
     def __init__(self, api_key: str | None = None, model: str | None = None, max_frames: int = 500):
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
         if not self.api_key:
-            raise ValueError("OPENROUTER_API_KEY is required for OpenRouterRangeAnalyzer.")
+            raise ValueError("OPENROUTER_API_KEY is required for OpenRouterVideoAnalyzer.")
         self.model = model or os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-pro")
         self.max_frames = max_frames
-        logger.info("OpenRouterRangeAnalyzer configured with model=%s max_frames=%d", self.model, self.max_frames)
+        logger.info("OpenRouterVideoAnalyzer configured with model=%s max_frames=%d", self.model, self.max_frames)
 
     def _encode_image(self, image_path: str) -> str:
         with open(image_path, "rb") as f:

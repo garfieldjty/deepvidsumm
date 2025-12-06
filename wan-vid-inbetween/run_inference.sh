@@ -4,7 +4,7 @@
 #
 # Supports both:
 # - Standard (unidirectional) model: set LORA_PATH only
-# - Bidirectional model: set LORA_PATH and FUSION_MLP_PATH
+# - Bidirectional model: set LORA_PATH and FUSION_NET_PATH
 
 # Configuration
 CONFIG="config/default_inbetween_config.yaml"
@@ -15,11 +15,11 @@ CONFIG="config/default_inbetween_config.yaml"
 
 # Option 1: Standard (unidirectional) model
 LORA_PATH="outputs/inbetween_lora/"
-FUSION_MLP_PATH=""  # Leave empty for unidirectional model
+FUSION_NET_PATH=""  # Leave empty for unidirectional model
 
 # Option 2: Bidirectional model (uncomment to use)
 # LORA_PATH="outputs/bidirectional_inbetween_lora/lora/"
-# FUSION_MLP_PATH="outputs/bidirectional_inbetween_lora/fusion_mlp.pt"
+# FUSION_NET_PATH="outputs/bidirectional_inbetween_lora/fusion_net.pt"
 
 # Start video parameters
 START_VIDEO_PATH="path/to/start_video.mp4" # Path to first video
@@ -51,9 +51,9 @@ CMD="--config $CONFIG \
     --output_path $OUTPUT_PATH \
     --attn_implementation $ATTN_IMPLEMENTATION"
 
-# Add bidirectional parameters if fusion MLP path is set
-if [ -n "$FUSION_MLP_PATH" ]; then
-    CMD="$CMD --fusion_mlp_path $FUSION_MLP_PATH"
+# Add bidirectional parameters if fusion network path is set
+if [ -n "$FUSION_NET_PATH" ]; then
+    CMD="$CMD --fusion_net_path $FUSION_NET_PATH"
     CMD="$CMD --fusion_hidden_dim $FUSION_HIDDEN_DIM"
     CMD="$CMD --fusion_num_layers $FUSION_NUM_LAYERS"
     CMD="$CMD --cnn_feature_dim $CNN_FEATURE_DIM"

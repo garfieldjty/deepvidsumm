@@ -30,9 +30,6 @@ from diffusers.models.embeddings import PixArtAlphaTextProjection, TimestepEmbed
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import FP32LayerNorm
-# from diffusers.models.transformers.transformer_wan import ContextParallelInput, ContextParallelOutput
-
-# from wan_teacache import TeaCache
 
 # Dummy TeaCache class for compatibility
 class TeaCache:

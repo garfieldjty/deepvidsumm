@@ -7,14 +7,6 @@ from diffusers import (
 )
 from peft import LoraConfig, get_peft_model
 
-try:
-    # Newer PEFT: has TaskType enum
-    from peft import TaskType
-    _DEFAULT_TASK_TYPE = TaskType.FEATURE_EXTRACTION
-except Exception:
-    # Older PEFT: use plain string; must match allowed list in your error
-    _DEFAULT_TASK_TYPE = "FEATURE_EXTRACTION"
-
 from .wan_condition_transformer import WanTransformer3DModel
 
 
@@ -61,7 +53,7 @@ def load_wan_components(
     return vae, transformer, scheduler
 
 
-def add_lora_to_transformer(transformer, r, alpha, dropout, total_steps):
+def add_lora_to_transformer(transformer, r, alpha, dropout):
     """
     Attach LoRA adapters to Wan transformer:
 

@@ -9,8 +9,7 @@ import subprocess
 import re
 import csv
 import json
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Any
 import argparse
 import sys
 
@@ -68,20 +67,6 @@ def find_matching_videos(original_dir: str, generated_dir: str) -> List[Tuple[st
             print(f"Warning: No matching generated video for original: {base_name}")
     
     return matches
-
-def run_ffmpeg_metric(original_path: str, generated_path: str, metric: str) -> Dict[str, float]:
-    """
-    Run ffmpeg to calculate a specific metric between two videos.
-    Returns dictionary with metric values.
-    """
-    if metric == "ssim":
-        return calculate_ssim(original_path, generated_path)
-    elif metric == "psnr":
-        return calculate_psnr(original_path, generated_path)
-    elif metric == "vmaf":
-        return calculate_vmaf(original_path, generated_path)
-    else:
-        raise ValueError(f"Unknown metric: {metric}")
 
 def calculate_ssim(original_path: str, generated_path: str) -> Dict[str, float]:
     """
@@ -149,7 +134,7 @@ def calculate_ssim(original_path: str, generated_path: str) -> Dict[str, float]:
 def calculate_psnr(original_path: str, generated_path: str) -> Dict[str, float]:
     """
     Calculate PSNR (Peak Signal-to-Noise Ratio) using ffmpeg.
-    Returns dictionary with Y, U, V, and All components.
+    Returns dictionary with average, min, and max values.
     Only scores frames 40-80.
     """
     cmd = [
@@ -261,8 +246,8 @@ def calculate_vmaf(original_path: str, generated_path: str) -> Dict[str, float]:
 def create_multi_model_comparison(video_name: str, original_path: str, model_paths: Dict[str, str], 
                                  output_path: str) -> bool:
     """
-    Extract 6 frames from the middle 60 frames (frames 40, 50, 60, 70, 80, 90) 
-    and create a vertical concatenation comparing original vs all 3 models side by side.
+    Extract 6 frames (frames 40, 50, 60, 70, 80, 90) and create a vertical 
+    concatenation comparing original vs all models side by side.
     Returns True if successful.
     """
     try:
@@ -349,12 +334,12 @@ def create_multi_model_comparison(video_name: str, original_path: str, model_pat
             for frame in frames_list:
                 try:
                     os.remove(frame)
-                except:
+                except OSError:
                     pass
         for row in comparison_rows:
             try:
                 os.remove(row)
-            except:
+            except OSError:
                 pass
         
         return True
@@ -482,13 +467,11 @@ def main():
     video_map = {}  # video_name -> {model_name: (original_path, generated_path)}
     
     for model_name, generated_dir in model_dirs:
-        # Check if directory exists and has videos
         if not os.path.exists(generated_dir):
             print(f"Warning: Directory {generated_dir} does not exist, skipping {model_name}")
             continue
         
-        video_files = [f for f in os.listdir(generated_dir) if f.endswith(".mp4")]
-        if not video_files:
+        if not any(f.endswith(".mp4") for f in os.listdir(generated_dir)):
             print(f"Warning: No MP4 files found in {generated_dir}, skipping {model_name}")
             continue
         
@@ -524,13 +507,11 @@ def main():
             results = evaluate_video_pair(original_path, generated_path, model_name)
             all_results.append(results)
         
-        # Create multi-model comparison if requested and we have all 3 models
-        if args.create_comparison and len(model_data) >= 2:
-            print(f"\nCreating multi-model comparison...")
-            # Get the original path from any model entry
+        # Create multi-model comparison if requested and we have multiple models
+        if args.create_comparison and comparison_dir and len(model_data) >= 2:
+            print("\nCreating multi-model comparison...")
             original_path = list(model_data.values())[0][0]
             
-            # Build model_paths dict
             model_paths = {model_name: generated_path 
                           for model_name, (_, generated_path) in model_data.items()}
             

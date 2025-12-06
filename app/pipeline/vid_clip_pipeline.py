@@ -13,7 +13,7 @@ from app.pipeline.base import PipelineBase
 logger = logging.getLogger(__name__)
 
 
-class SimplePipeline(PipelineBase):
+class VideoClipPipeline(PipelineBase):
     """
     Orchestrates preprocessing -> analysis -> composition.
     """

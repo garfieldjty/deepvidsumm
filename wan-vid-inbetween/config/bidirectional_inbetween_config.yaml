@@ -3,11 +3,11 @@
 # ============================
 # This config is for the BidirectionalInbetweenTrainer which uses:
 # - Single LoRA for both forward and backward passes
-# - A pre-trained Cumulative Softmax MLP for monotonic fusion (frozen)
+# - A pre-trained Cumulative Softmax Fusion Network for monotonic fusion (frozen)
 #
 # Training flow:
-# 1. First train the fusion MLP separately (see fusion_mlp_config.yaml)
-# 2. Then train the bidirectional LoRA with the frozen MLP
+# 1. First train the fusion network separately (see fusion_net_config.yaml)
+# 2. Then train the bidirectional LoRA with the frozen fusion network
 # ============================
 
 # -------- Model --------
@@ -74,12 +74,12 @@ lora_dropout: 0.05
 # 192 = 6 full accumulation cycles per mode
 alternating_steps: 192
 
-# -------- Fusion MLP (Pre-trained, Frozen) --------
-# Path to the pre-trained fusion MLP weights
-# Train this first using train_fusion_mlp.py with fusion_mlp_config.yaml
-pretrained_fusion_mlp_path: "/workspace/deepvidsumm/wan-vid-inbetween/outputs_bk4/fusion_mlp/fusion_mlp.pt"
+# -------- Fusion Network (Pre-trained, Frozen) --------
+# Path to the pre-trained fusion network weights
+# Train this first using train_fusion_net.py with fusion_net_config.yaml
+pretrained_fusion_net_path: "/workspace/deepvidsumm/wan-vid-inbetween/outputs_bk4/fusion_net/fusion_net.pt"
 
-# MLP architecture (must match the pre-trained model)
+# Fusion network architecture (must match the pre-trained model)
 fusion_hidden_dim: 256
 fusion_num_layers: 3
 cnn_feature_dim: 64  # Output feature dim from CNN spatial encoder

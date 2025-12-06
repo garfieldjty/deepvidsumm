@@ -1,17 +1,17 @@
-# scripts/train_fusion_mlp.py
+# scripts/train_fusion_net.py
 """
-Training script for the Cumulative Softmax Fusion MLP.
+Training script for the Cumulative Softmax Fusion Network.
 
-This trains the fusion MLP separately by learning to predict fusion weights
+This trains the fusion network separately by learning to predict fusion weights
 from start/end latents, supervised by ground-truth similarity patterns.
 
-The trained MLP can then be used by the bidirectional inbetweening trainer.
+The trained network can then be used by the bidirectional inbetweening trainer.
 
 Usage:
-    python -m src.train_fusion_mlp --config config/fusion_mlp_config.yaml
+    python -m src.train_fusion_net --config config/fusion_net_config.yaml
     
     # With accelerate for multi-GPU
-    accelerate launch -m src.train_fusion_mlp --config config/fusion_mlp_config.yaml
+    accelerate launch -m src.train_fusion_net --config config/fusion_net_config.yaml
 """
 
 import argparse
@@ -32,12 +32,12 @@ from src.utils import load_config
 from src.utils_latents import retrieve_latents
 from src.models import load_wan_components
 from src.dataset import InbetweenVideoDataset
-from src.trainer import CumulativeSoftmaxFusionMLP
+from src.trainer import CumulativeSoftmaxFusionNet
 
 
 @dataclass
-class FusionMLPTrainConfig:
-    """Configuration for fusion MLP training."""
+class FusionNetTrainConfig:
+    """Configuration for fusion network training."""
     base_model_path: str
     data_root: str
     video_glob: str
@@ -56,9 +56,9 @@ class FusionMLPTrainConfig:
     learning_rate: float
     seed: int
     output_dir: str
-    # VAE precision (transformer not needed for MLP training)
+    # VAE precision (transformer not needed for fusion network training)
     vae_precision: str = "fp32"
-    # Fusion MLP settings
+    # Fusion network settings
     fusion_hidden_dim: int = 256
     fusion_num_layers: int = 3
     cnn_feature_dim: int = 64  # Output feature dim from CNN spatial encoder
@@ -70,15 +70,15 @@ class FusionMLPTrainConfig:
     resume_from_checkpoint: Optional[str] = None
 
 
-class FusionMLPTrainer:
+class FusionNetTrainer:
     """
-    Trainer for the Cumulative Softmax Fusion MLP.
+    Trainer for the Cumulative Softmax Fusion Network.
     
-    This trains the MLP to predict fusion weights from start/end latents,
+    This trains the network to predict fusion weights from start/end latents,
     using ground-truth weights computed from latent similarity.
     """
     
-    def __init__(self, cfg: FusionMLPTrainConfig):
+    def __init__(self, cfg: FusionNetTrainConfig):
         self.cfg = cfg
         
         self.acc = Accelerator(
@@ -86,7 +86,7 @@ class FusionMLPTrainer:
             mixed_precision="bf16"
         )
 
-        # Load VAE only (we don't need the transformer for MLP training)
+        # Load VAE only (we don't need the transformer for fusion network training)
         self.vae, _, _ = load_wan_components(
             cfg.base_model_path,
             transformer_precision="bf16",  # doesn't matter, not used
@@ -97,8 +97,8 @@ class FusionMLPTrainer:
         # Get latent channel dimension from VAE config
         latent_dim = self.vae.config.z_dim
         
-        # Create fusion MLP with CNN spatial encoder
-        self.fusion_mlp = CumulativeSoftmaxFusionMLP(
+        # Create fusion network with CNN spatial encoder
+        self.fusion_net = CumulativeSoftmaxFusionNet(
             latent_dim=latent_dim,
             hidden_dim=cfg.fusion_hidden_dim,
             num_layers=cfg.fusion_num_layers,
@@ -107,7 +107,7 @@ class FusionMLPTrainer:
 
         # Optimizer
         self.optim = Lion(
-            self.fusion_mlp.parameters(), 
+            self.fusion_net.parameters(), 
             lr=cfg.learning_rate, 
             weight_decay=1e-5
         )
@@ -138,8 +138,8 @@ class FusionMLPTrainer:
         )
 
         # Prepare with accelerator
-        self.fusion_mlp, self.optim, self.dl = self.acc.prepare(
-            self.fusion_mlp, self.optim, self.dl
+        self.fusion_net, self.optim, self.dl = self.acc.prepare(
+            self.fusion_net, self.optim, self.dl
         )
         
         # Move VAE to device manually
@@ -154,13 +154,13 @@ class FusionMLPTrainer:
             num_gpus = self.acc.num_processes
             effective_batch = cfg.train_batch_size * num_gpus * cfg.gradient_accumulation_steps
             print(f"\n{'='*60}")
-            print("FUSION MLP TRAINER")
+            print("FUSION NETWORK TRAINER")
             print(f"{'='*60}")
             print(f"Training on {num_gpus} GPU(s)")
             print(f"  Per-GPU batch size: {cfg.train_batch_size}")
             print(f"  Gradient accumulation steps: {cfg.gradient_accumulation_steps}")
             print(f"  Effective batch size: {effective_batch}")
-            print(f"  MLP params: {sum(p.numel() for p in self.fusion_mlp.parameters()):,}")
+            print(f"  Network params: {sum(p.numel() for p in self.fusion_net.parameters()):,}")
             print(f"  Hidden dim: {cfg.fusion_hidden_dim}")
             print(f"  Num layers: {cfg.fusion_num_layers}")
             print(f"{'='*60}\n")
@@ -168,13 +168,13 @@ class FusionMLPTrainer:
         # TensorBoard logging
         self.writer = None
         if self.acc.is_local_main_process:
-            log_dir = Path(cfg.log_dir) / "tensorboard_fusion_mlp"
+            log_dir = Path(cfg.log_dir) / "tensorboard_fusion_net"
             log_dir.mkdir(parents=True, exist_ok=True)
             self.writer = SummaryWriter(log_dir=str(log_dir))
             print(f"TensorBoard logs → {log_dir}")
 
         # Checkpoint directory
-        self.checkpoint_dir = Path(cfg.output_dir) / "checkpoints_fusion_mlp"
+        self.checkpoint_dir = Path(cfg.output_dir) / "checkpoints_fusion_net"
         if self.acc.is_local_main_process:
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -188,9 +188,9 @@ class FusionMLPTrainer:
         checkpoint_path = self.checkpoint_dir / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
-        # Save fusion MLP
-        fusion_mlp_unwrapped = self.acc.unwrap_model(self.fusion_mlp)
-        torch.save(fusion_mlp_unwrapped.state_dict(), checkpoint_path / "fusion_mlp.pt")
+        # Save fusion network
+        fusion_net_unwrapped = self.acc.unwrap_model(self.fusion_net)
+        torch.save(fusion_net_unwrapped.state_dict(), checkpoint_path / "fusion_net.pt")
 
         # Save optimizer state
         torch.save(self.optim.state_dict(), checkpoint_path / "optimizer.pt")
@@ -237,13 +237,13 @@ class FusionMLPTrainer:
             self.global_step = state["global_step"]
             print(f"Resuming from step {self.global_step}")
 
-        # Load fusion MLP
-        fusion_path = checkpoint_path / "fusion_mlp.pt"
+        # Load fusion network
+        fusion_path = checkpoint_path / "fusion_net.pt"
         if fusion_path.exists():
             fusion_state = torch.load(fusion_path, map_location=self.acc.device)
-            fusion_mlp_unwrapped = self.acc.unwrap_model(self.fusion_mlp)
-            fusion_mlp_unwrapped.load_state_dict(fusion_state)
-            print(f"Loaded fusion MLP from {fusion_path}")
+            fusion_net_unwrapped = self.acc.unwrap_model(self.fusion_net)
+            fusion_net_unwrapped.load_state_dict(fusion_state)
+            print(f"Loaded fusion network from {fusion_path}")
 
         # Load optimizer state
         optim_path = checkpoint_path / "optimizer.pt"
@@ -263,16 +263,16 @@ class FusionMLPTrainer:
 
     def train(self):
         """
-        Main training loop for fusion MLP.
+        Main training loop for fusion network.
         
         Training procedure:
         1. Encode video segments (start, mid, end) to latents
-        2. Predict fusion weights from start/end latents via MLP
+        2. Predict fusion weights from start/end latents via fusion network
         3. Compute GT weights from latent similarity
         4. MSE loss between predicted and GT weights
         """
         device = self.acc.device
-        self.fusion_mlp.train()
+        self.fusion_net.train()
         self.vae.eval()
 
         # Resume from checkpoint if specified
@@ -297,7 +297,7 @@ class FusionMLPTrainer:
             total=self.cfg.num_train_steps,
             initial=step,
             disable=not self.acc.is_local_main_process,
-            desc="Fusion MLP Training"
+            desc="Fusion Network Training"
         )
 
         # Loss tracking
@@ -306,7 +306,7 @@ class FusionMLPTrainer:
 
         while step < self.cfg.num_train_steps:
             for batch in self.dl:
-                with self.acc.accumulate(self.fusion_mlp):
+                with self.acc.accumulate(self.fusion_net):
                     # Video: [B, T, C, H, W] -> [B, C, T, H, W]
                     video = batch["video"].to(device, non_blocking=True)
                     video = video.permute(0, 2, 1, 3, 4)
@@ -356,11 +356,11 @@ class FusionMLPTrainer:
                     _, _, T_mid_lat, _, _ = mid_lat.shape
 
                     # Predict fusion weights
-                    w_fwd_pred, w_bwd_pred = self.fusion_mlp(start_lat, end_lat, T_mid_lat)
+                    w_fwd_pred, w_bwd_pred = self.fusion_net(start_lat, end_lat, T_mid_lat)
                     
                     # Compute GT weights from latent similarity
                     with torch.no_grad():
-                        w_fwd_gt, w_bwd_gt = CumulativeSoftmaxFusionMLP.compute_gt_weights_from_similarity(
+                        w_fwd_gt, w_bwd_gt = CumulativeSoftmaxFusionNet.compute_gt_weights_from_similarity(
                             mid_lat, start_lat, end_lat
                         )
                     
@@ -418,8 +418,8 @@ class FusionMLPTrainer:
             output_path.mkdir(parents=True, exist_ok=True)
             
             torch.save(
-                self.acc.unwrap_model(self.fusion_mlp).state_dict(), 
-                output_path / "fusion_mlp.pt"
+                self.acc.unwrap_model(self.fusion_net).state_dict(), 
+                output_path / "fusion_net.pt"
             )
             
             # Also save config for reference
@@ -429,10 +429,10 @@ class FusionMLPTrainer:
                 "latent_dim": self.vae.config.z_dim,
                 "num_train_steps": self.cfg.num_train_steps,
             }
-            with open(output_path / "fusion_mlp_config.json", "w") as f:
+            with open(output_path / "fusion_net_config.json", "w") as f:
                 json.dump(config_info, f, indent=2)
             
-            print(f"Saved final fusion MLP → {output_path / 'fusion_mlp.pt'}")
+            print(f"Saved final fusion network → {output_path / 'fusion_net.pt'}")
 
             if self.writer:
                 self.writer.close()
@@ -442,12 +442,12 @@ class FusionMLPTrainer:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train Fusion MLP for bidirectional video inbetweening"
+        description="Train Fusion Network for bidirectional video inbetweening"
     )
     parser.add_argument(
         "--config",
         type=str,
-        default="config/fusion_mlp_config.yaml",
+        default="config/fusion_net_config.yaml",
         help="Path to YAML config file",
     )
     parser.add_argument(
@@ -464,8 +464,8 @@ def main():
     if args.resume:
         cfg["resume_from_checkpoint"] = args.resume
 
-    # Map YAML -> FusionMLPTrainConfig
-    train_cfg = FusionMLPTrainConfig(
+    # Map YAML -> FusionNetTrainConfig
+    train_cfg = FusionNetTrainConfig(
         base_model_path=cfg["base_model_path"],
         data_root=cfg["data_root"],
         video_glob=cfg.get("video_glob", "**/*.mp4"),
@@ -495,7 +495,7 @@ def main():
     )
 
     print("\n" + "=" * 60)
-    print("FUSION MLP TRAINING")
+    print("FUSION NETWORK TRAINING")
     print("=" * 60)
     print(f"Config: {args.config}")
     print(f"Output: {train_cfg.output_dir}")
@@ -504,7 +504,7 @@ def main():
     print(f"CNN feature dim: {train_cfg.cnn_feature_dim}")
     print("=" * 60 + "\n")
 
-    trainer = FusionMLPTrainer(train_cfg)
+    trainer = FusionNetTrainer(train_cfg)
     trainer.train()
 
 

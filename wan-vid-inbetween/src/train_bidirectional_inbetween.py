@@ -4,11 +4,11 @@ Training script for Bidirectional Video Inbetweening.
 
 This trainer uses:
 - Single LoRA for both forward and backward passes
-- Pre-trained (frozen) Cumulative Softmax MLP for fusion weights
+- Pre-trained (frozen) Cumulative Softmax Fusion Network for fusion weights
 
 Training flow:
-1. First train the fusion MLP using train_fusion_mlp.py
-2. Then run this script with pretrained_fusion_mlp_path pointing to the MLP
+1. First train the fusion network using train_fusion_net.py
+2. Then run this script with pretrained_fusion_net_path pointing to the network
 
 Usage:
     # Single GPU
@@ -29,7 +29,7 @@ from src.trainer import BidirectionalTrainConfig, BidirectionalInbetweenTrainer
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train Bidirectional Video Inbetweening with Frozen Fusion MLP"
+        description="Train Bidirectional Video Inbetweening with Frozen Fusion Network"
     )
     parser.add_argument(
         "--config",
@@ -85,11 +85,11 @@ def main():
         lora_alpha=cfg.get("lora_alpha", 128),
         lora_dropout=cfg.get("lora_dropout", 0.0),
         
-        # Fusion MLP (pre-trained and frozen)
+        # Fusion Network (pre-trained and frozen)
         fusion_hidden_dim=cfg.get("fusion_hidden_dim", 256),
         fusion_num_layers=cfg.get("fusion_num_layers", 3),
         cnn_feature_dim=cfg.get("cnn_feature_dim", 64),
-        pretrained_fusion_mlp_path=cfg.get("pretrained_fusion_mlp_path", None),
+        pretrained_fusion_net_path=cfg.get("pretrained_fusion_net_path", None),
         
         # Alternating training steps
         alternating_steps=cfg.get("alternating_steps", 200),
@@ -103,13 +103,13 @@ def main():
         resume_from_checkpoint=cfg.get("resume_from_checkpoint", None),
     )
 
-    # Validate that pretrained MLP path is provided
-    if not train_cfg.pretrained_fusion_mlp_path:
+    # Validate that pretrained network path is provided
+    if not train_cfg.pretrained_fusion_net_path:
         print("\n" + "=" * 60)
-        print("WARNING: No pretrained_fusion_mlp_path specified!")
-        print("The fusion MLP will be randomly initialized.")
-        print("For best results, first train the MLP using:")
-        print("  python -m src.train_fusion_mlp --config config/fusion_mlp_config.yaml")
+        print("WARNING: No pretrained_fusion_net_path specified!")
+        print("The fusion network will be randomly initialized.")
+        print("For best results, first train the network using:")
+        print("  python -m src.train_fusion_net --config config/fusion_net_config.yaml")
         print("=" * 60 + "\n")
 
     print("\n" + "=" * 60)
@@ -118,11 +118,11 @@ def main():
     print(f"Config: {args.config}")
     print(f"Output: {train_cfg.output_dir}")
     print(f"LoRA rank: {train_cfg.lora_r}")
-    print(f"Fusion MLP: {train_cfg.fusion_num_layers} layers, {train_cfg.fusion_hidden_dim} hidden dim")
-    if train_cfg.pretrained_fusion_mlp_path:
-        print(f"Fusion MLP weights: {train_cfg.pretrained_fusion_mlp_path} (frozen)")
+    print(f"Fusion Network: {train_cfg.fusion_num_layers} layers, {train_cfg.fusion_hidden_dim} hidden dim")
+    if train_cfg.pretrained_fusion_net_path:
+        print(f"Fusion Network weights: {train_cfg.pretrained_fusion_net_path} (frozen)")
     else:
-        print(f"Fusion MLP weights: random init (WARNING: not recommended)")
+        print(f"Fusion Network weights: random init (WARNING: not recommended)")
     print(f"Alternating steps: {train_cfg.alternating_steps}")
     print("=" * 60 + "\n")
 

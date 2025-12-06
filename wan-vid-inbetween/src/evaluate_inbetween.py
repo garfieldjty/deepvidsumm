@@ -12,7 +12,7 @@ This script:
 
 Supports both:
 - Standard (unidirectional) model: --lora_path only
-- Bidirectional model: --lora_path + --fusion_mlp_path
+- Bidirectional model: --lora_path + --fusion_net_path
 """
 
 import argparse
@@ -360,7 +360,7 @@ def evaluate_single_cut(
     # Bidirectional model parameters
     lora_fwd_path: Optional[str] = None,
     lora_bwd_path: Optional[str] = None,
-    fusion_mlp_path: Optional[str] = None,
+    fusion_net_path: Optional[str] = None,
     attn_implementation: str = "sdpa",
     fusion_hidden_dim: int = 256,
     fusion_num_layers: int = 3,
@@ -388,18 +388,18 @@ def evaluate_single_cut(
         vae_precision: VAE precision
         lora_fwd_path: Path to forward LoRA weights (for bidirectional model)
         lora_bwd_path: Path to backward LoRA weights (for bidirectional model)
-        fusion_mlp_path: Path to fusion MLP weights (if using bidirectional model)
+        fusion_net_path: Path to fusion network weights (if using bidirectional model)
         attn_implementation: Attention implementation ("sdpa", "flash_attention_2", "eager")
-        fusion_hidden_dim: Hidden dim of fusion MLP (if bidirectional)
-        fusion_num_layers: Num layers in fusion MLP (if bidirectional)
-        cnn_feature_dim: CNN feature dim in fusion MLP (if bidirectional)
+        fusion_hidden_dim: Hidden dim of fusion network (if bidirectional)
+        fusion_num_layers: Num layers in fusion network (if bidirectional)
+        cnn_feature_dim: CNN feature dim in fusion network (if bidirectional)
         
     Returns:
         Dictionary with evaluation metrics
     """
-    # Determine if using bidirectional model (requires both LoRAs and fusion MLP)
+    # Determine if using bidirectional model (requires both LoRAs and fusion network)
     use_bidirectional = (lora_fwd_path is not None and lora_bwd_path is not None 
-                         and fusion_mlp_path is not None)
+                         and fusion_net_path is not None)
     
     # Create output subdirectory for this cut
     cut_output_dir = os.path.join(output_dir, f"{video_name}_cut{cut_idx}")
@@ -456,7 +456,7 @@ def evaluate_single_cut(
                 base_model_path=base_model_path,
                 lora_fwd_path=lora_fwd_path,
                 lora_bwd_path=lora_bwd_path,
-                fusion_mlp_path=fusion_mlp_path,
+                fusion_net_path=fusion_net_path,
                 start_video_path=video_path,
                 start_frame_index=max(0, start_frame_idx),
                 start_duration=start_duration,
@@ -667,10 +667,10 @@ def main():
         help="Path to backward LoRA weights (for bidirectional model)",
     )
     parser.add_argument(
-        "--fusion_mlp_path",
+        "--fusion_net_path",
         type=str,
         default=None,
-        help="Path to fusion MLP weights (for bidirectional model)",
+        help="Path to fusion network weights (for bidirectional model)",
     )
     parser.add_argument(
         "--output_dir",
@@ -719,19 +719,19 @@ def main():
         "--fusion_hidden_dim",
         type=int,
         default=256,
-        help="Hidden dimension of fusion MLP (if bidirectional)",
+        help="Hidden dimension of fusion network (if bidirectional)",
     )
     parser.add_argument(
         "--fusion_num_layers",
         type=int,
         default=3,
-        help="Number of layers in fusion MLP (if bidirectional)",
+        help="Number of layers in fusion network (if bidirectional)",
     )
     parser.add_argument(
         "--cnn_feature_dim",
         type=int,
         default=64,
-        help="CNN feature dimension in fusion MLP (if bidirectional)",
+        help="CNN feature dimension in fusion network (if bidirectional)",
     )
     
     args = parser.parse_args()
@@ -739,7 +739,7 @@ def main():
     # Check if using bidirectional mode (requires all three paths)
     use_bidirectional = (args.lora_fwd_path is not None and 
                          args.lora_bwd_path is not None and 
-                         args.fusion_mlp_path is not None)
+                         args.fusion_net_path is not None)
     
     # Validate: either unidirectional (lora_path) or bidirectional (fwd+bwd+fusion) required
     if use_bidirectional:
@@ -750,7 +750,7 @@ def main():
         pass
     else:
         parser.error("Either --lora_path (for unidirectional) OR "
-                     "--lora_fwd_path + --lora_bwd_path + --fusion_mlp_path (for bidirectional) is required")
+                     "--lora_fwd_path + --lora_bwd_path + --fusion_net_path (for bidirectional) is required")
     
     # Initialize accelerator for multi-GPU support
     accelerator = Accelerator()
@@ -775,7 +775,7 @@ def main():
             print(f"Using BIDIRECTIONAL model:")
             print(f"  Forward LoRA: {args.lora_fwd_path}")
             print(f"  Backward LoRA: {args.lora_bwd_path}")
-            print(f"  Fusion MLP: {args.fusion_mlp_path}")
+            print(f"  Fusion Network: {args.fusion_net_path}")
         else:
             print(f"Using STANDARD (unidirectional) model: {args.lora_path}")
     
@@ -866,7 +866,7 @@ def main():
                 # Bidirectional model parameters
                 lora_fwd_path=args.lora_fwd_path,
                 lora_bwd_path=args.lora_bwd_path,
-                fusion_mlp_path=args.fusion_mlp_path,
+                fusion_net_path=args.fusion_net_path,
                 attn_implementation=args.attn_implementation,
                 fusion_hidden_dim=args.fusion_hidden_dim,
                 fusion_num_layers=args.fusion_num_layers,

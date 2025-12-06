@@ -20,7 +20,7 @@ from peft import PeftModel
 from .wan_condition_transformer import WanTransformer3DModel
 from .utils_latents import retrieve_latents
 from .dataset import read_video_frames, resize_frames
-from .trainer import CumulativeSoftmaxFusionMLP
+from .trainer import CumulativeSoftmaxFusionNet
 
 
 def load_wan_with_lora(
@@ -55,7 +55,7 @@ def load_wan_bidirectional(
     base_model_path: str,
     lora_fwd_path: str,
     lora_bwd_path: str,
-    fusion_mlp_path: str,
+    fusion_net_path: str,
     transformer_precision: str = "bf16",
     vae_precision: str = "fp32",
     attn_implementation: str = "sdpa",
@@ -73,16 +73,16 @@ def load_wan_bidirectional(
         base_model_path: Path to base Wan model
         lora_fwd_path: Path to forward LoRA weights
         lora_bwd_path: Path to backward LoRA weights
-        fusion_mlp_path: Path to pre-trained fusion MLP weights
+        fusion_net_path: Path to pre-trained fusion network weights
         transformer_precision: Precision for transformer
         vae_precision: Precision for VAE
         attn_implementation: Attention implementation
-        fusion_hidden_dim: Hidden dim of fusion MLP (must match training)
-        fusion_num_layers: Num layers in fusion MLP (must match training)
-        cnn_feature_dim: CNN feature dim in fusion MLP (must match training)
+        fusion_hidden_dim: Hidden dim of fusion network (must match training)
+        fusion_num_layers: Num layers in fusion network (must match training)
+        cnn_feature_dim: CNN feature dim in fusion network (must match training)
     
     Returns:
-        vae, transformer (base, no LoRA), scheduler, fusion_mlp, lora_fwd_path, lora_bwd_path
+        vae, transformer (base, no LoRA), scheduler, fusion_net, lora_fwd_path, lora_bwd_path
     """
     dtype_t = torch.bfloat16 if transformer_precision == "bf16" else torch.float16
     dtype_vae = torch.float32 if vae_precision == "fp32" else torch.float16
@@ -102,19 +102,19 @@ def load_wan_bidirectional(
         base_model_path, subfolder="scheduler"
     )
     
-    # Load fusion MLP
+    # Load fusion network
     latent_dim = vae.config.z_dim
-    fusion_mlp = CumulativeSoftmaxFusionMLP(
+    fusion_net = CumulativeSoftmaxFusionNet(
         latent_dim=latent_dim,
         hidden_dim=fusion_hidden_dim,
         num_layers=fusion_num_layers,
         cnn_feature_dim=cnn_feature_dim,
     )
-    fusion_mlp.load_state_dict(torch.load(fusion_mlp_path, map_location="cpu"))
-    fusion_mlp.eval()
-    fusion_mlp.to(dtype_t)
+    fusion_net.load_state_dict(torch.load(fusion_net_path, map_location="cpu"))
+    fusion_net.eval()
+    fusion_net.to(dtype_t)
 
-    return vae, transformer, scheduler, fusion_mlp, lora_fwd_path, lora_bwd_path
+    return vae, transformer, scheduler, fusion_net, lora_fwd_path, lora_bwd_path
 
 
 def _frames_to_tensor(frames: List[np.ndarray], height: int, width: int) -> torch.Tensor:
@@ -622,7 +622,7 @@ def generate_bidirectional_inbetween_from_two_videos(
     base_model_path: str,
     lora_fwd_path: str,
     lora_bwd_path: str,
-    fusion_mlp_path: str,
+    fusion_net_path: str,
     start_video_path: str,
     start_frame_index: int,
     start_duration: int,
@@ -650,16 +650,16 @@ def generate_bidirectional_inbetween_from_two_videos(
     This uses two separate LoRAs matching the BidirectionalInbetweenTrainer:
     - Forward LoRA: [start, noisy_mid] with mask [True, False] -> predict mid velocity
     - Backward LoRA: [noisy_mid, end] with mask [False, True] -> predict mid velocity
-    - Fusion MLP: produces monotonic blending weights via cumulative softmax
+    - Fusion Network: produces monotonic blending weights via cumulative softmax
     
-    The forward and backward predictions are fused using the MLP weights,
+    The forward and backward predictions are fused using the network weights,
     then the fused velocity is used for the scheduler step.
     
     Args:
         base_model_path: Path to base Wan model
         lora_fwd_path: Path to forward LoRA weights
         lora_bwd_path: Path to backward LoRA weights  
-        fusion_mlp_path: Path to pre-trained fusion MLP weights
+        fusion_net_path: Path to pre-trained fusion network weights
         start_video_path: Path to first video
         start_frame_index: Starting frame index in first video
         start_duration: Number of frames to use from first video
@@ -674,9 +674,9 @@ def generate_bidirectional_inbetween_from_two_videos(
         transformer_precision: Precision for transformer
         vae_precision: Precision for VAE
         attn_implementation: Attention implementation
-        fusion_hidden_dim: Hidden dim of fusion MLP
-        fusion_num_layers: Num layers in fusion MLP
-        cnn_feature_dim: CNN feature dim in fusion MLP
+        fusion_hidden_dim: Hidden dim of fusion network
+        fusion_num_layers: Num layers in fusion network
+        cnn_feature_dim: CNN feature dim in fusion network
         weight_threshold: Minimum weight to include a direction in fusion
         output_path: Path to save the output video
         generate_unfused: If True, also generate forward-only and backward-only outputs
@@ -688,11 +688,11 @@ def generate_bidirectional_inbetween_from_two_videos(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 1) Load components (single transformer, LoRAs will be swapped during inference)
-    vae, transformer, scheduler, fusion_mlp, lora_fwd_path, lora_bwd_path = load_wan_bidirectional(
+    vae, transformer, scheduler, fusion_net, lora_fwd_path, lora_bwd_path = load_wan_bidirectional(
         base_model_path=base_model_path,
         lora_fwd_path=lora_fwd_path,
         lora_bwd_path=lora_bwd_path,
-        fusion_mlp_path=fusion_mlp_path,
+        fusion_net_path=fusion_net_path,
         transformer_precision=transformer_precision,
         vae_precision=vae_precision,
         attn_implementation=attn_implementation,
@@ -702,7 +702,7 @@ def generate_bidirectional_inbetween_from_two_videos(
     )
     vae.to(device)
     transformer.to(device)
-    fusion_mlp.to(device)
+    fusion_net.to(device)
     
     dtype_t = transformer.dtype
 
@@ -749,9 +749,9 @@ def generate_bidirectional_inbetween_from_two_videos(
     T_mid_lat = int(round((T_start_lat + T_end_lat) * mid_frames / (start_duration + end_duration)))
     T_mid_lat = max(1, T_mid_lat)  # At least 1 frame
 
-    # 6) Get fusion weights from MLP
+    # 6) Get fusion weights from Fusion Network
     with torch.no_grad():
-        w_fwd, w_bwd = fusion_mlp(start_lat, end_lat, T_mid_lat)
+        w_fwd, w_bwd = fusion_net(start_lat, end_lat, T_mid_lat)
         # w_fwd, w_bwd: [B, T_mid_lat] - weights that sum to 1 per frame
 
     # 7) Initialize mid latents as noise (same noise for both directions)

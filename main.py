@@ -1,19 +1,16 @@
-"""Entrypoint wiring together the modular components for deepvidsumm."""
-
 import logging
 from pathlib import Path
 
-from app.analyzer.openrouter_analyzer import OpenRouterRangeAnalyzer
+from app.analyzer.openrouter_analyzer import OpenRouterVideoAnalyzer
 from app.composer.ffmpeg_composer import FFMpegComposer
 from app.gui.gradio_gui import GradioGUI
-from app.pipeline.simple_pipeline import SimplePipeline
+from app.pipeline.vid_clip_pipeline import VideoClipPipeline
 from app.preprocessor.frame_preprocessor import FramePreprocessor
 
 
 def analyzer_factory():
-    """Initialize the OpenRouter analyzer; fail fast on errors for visibility."""
-    logging.info("Initializing OpenRouterRangeAnalyzer")
-    return OpenRouterRangeAnalyzer()
+    logging.info("Initializing OpenRouterVideoAnalyzer")
+    return OpenRouterVideoAnalyzer()
 
 
 def main():
@@ -29,7 +26,7 @@ def main():
     preprocessor = FramePreprocessor(workspace_path=str(workspace))
     composer = FFMpegComposer()
     analyzer = analyzer_factory()
-    pipeline = SimplePipeline(
+    pipeline = VideoClipPipeline(
         preprocessor=preprocessor,
         analyzer=analyzer,
         composer=composer,

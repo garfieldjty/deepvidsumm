@@ -1,12 +1,12 @@
 # ============================
-# Fusion MLP Training Config
+# Fusion Network Training Config
 # ============================
-# This config is for training the Cumulative Softmax Fusion MLP separately.
-# The trained MLP can then be used by the bidirectional inbetweening trainer.
+# This config is for training the Cumulative Softmax Fusion Network separately.
+# The trained network can then be used by the bidirectional inbetweening trainer.
 # ============================
 
 # -------- Model --------
-# Only VAE is needed (transformer not used for MLP training)
+# Only VAE is needed (transformer not used for fusion network training)
 base_model_path: "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 vae_precision: "bf16"
 
@@ -29,7 +29,7 @@ use_cut_focused_sampling: true
 cut_focus_prob: 0.66
 
 # -------- Training --------
-# MLP trains much faster than LoRA, can use larger batch sizes
+# Fusion network trains much faster than LoRA, can use larger batch sizes
 train_batch_size: 8
 gradient_accumulation_steps: 16
 
@@ -37,9 +37,9 @@ num_train_steps: 1000
 learning_rate: 1.0e-3
 seed: 68
 
-output_dir: "./outputs/fusion_mlp"
+output_dir: "./outputs/fusion_net"
 
-# -------- Fusion MLP --------
+# -------- Fusion Network --------
 fusion_hidden_dim: 256
 fusion_num_layers: 3
 cnn_feature_dim: 64  # Output feature dim from CNN spatial encoder

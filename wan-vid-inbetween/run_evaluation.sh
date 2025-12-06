@@ -4,7 +4,7 @@
 #
 # Supports both:
 # - Standard (unidirectional) model: set LORA_PATH only
-# - Bidirectional model: set LORA_FWD_PATH, LORA_BWD_PATH, and FUSION_MLP_PATH
+# - Bidirectional model: set LORA_FWD_PATH, LORA_BWD_PATH, and FUSION_NET_PATH
 
 # Configuration
 CONFIG="config/default_inbetween_config.yaml"
@@ -19,13 +19,13 @@ DATA_ROOT="/workspace/deepvidsumm/dep/clipshots/videos/ClipShots/videos/train"
 # LORA_PATH="/workspace/deepvidsumm/wan-vid-inbetween/outputs/inbetween_lora/"
 # LORA_FWD_PATH=""  # Leave empty for unidirectional model
 # LORA_BWD_PATH=""  # Leave empty for unidirectional model
-# FUSION_MLP_PATH=""  # Leave empty for unidirectional model
+# FUSION_NET_PATH=""  # Leave empty for unidirectional model
 
 # Option 2: Bidirectional model (uncomment to use)
 LORA_PATH=""  # Leave empty for bidirectional model
 LORA_FWD_PATH="/workspace/deepvidsumm/wan-vid-inbetween/outputs/bidirectional_inbetween_lora/checkpoints_bidirectional/checkpoint-2600/lora_fwd"
 LORA_BWD_PATH="/workspace/deepvidsumm/wan-vid-inbetween/outputs/bidirectional_inbetween_lora/checkpoints_bidirectional/checkpoint-2600/lora_bwd"
-FUSION_MLP_PATH="/workspace/deepvidsumm/wan-vid-inbetween/outputs/bidirectional_inbetween_lora/checkpoints_bidirectional/checkpoint-2600/fusion_mlp.pt"
+FUSION_NET_PATH="/workspace/deepvidsumm/wan-vid-inbetween/outputs/bidirectional_inbetween_lora/checkpoints_bidirectional/checkpoint-2600/fusion_net.pt"
 
 OUTPUT_DIR="outputs/evaluation"
 
@@ -68,18 +68,18 @@ if [ -n "$MAX_CUTS_PER_VIDEO" ]; then
     CMD="$CMD --max_cuts_per_video $MAX_CUTS_PER_VIDEO"
 fi
 
-# Add bidirectional parameters if fusion MLP path is set
-if [ -n "$FUSION_MLP_PATH" ]; then
+# Add bidirectional parameters if fusion network path is set
+if [ -n "$FUSION_NET_PATH" ]; then
     CMD="$CMD --lora_fwd_path $LORA_FWD_PATH"
     CMD="$CMD --lora_bwd_path $LORA_BWD_PATH"
-    CMD="$CMD --fusion_mlp_path $FUSION_MLP_PATH"
+    CMD="$CMD --fusion_net_path $FUSION_NET_PATH"
     CMD="$CMD --fusion_hidden_dim $FUSION_HIDDEN_DIM"
     CMD="$CMD --fusion_num_layers $FUSION_NUM_LAYERS"
     CMD="$CMD --cnn_feature_dim $CNN_FEATURE_DIM"
     echo "Using BIDIRECTIONAL model"
     echo "  Forward LoRA: $LORA_FWD_PATH"
     echo "  Backward LoRA: $LORA_BWD_PATH"
-    echo "  Fusion MLP: $FUSION_MLP_PATH"
+    echo "  Fusion Network: $FUSION_NET_PATH"
 else
     echo "Using STANDARD (unidirectional) model"
     echo "  LoRA: $LORA_PATH"

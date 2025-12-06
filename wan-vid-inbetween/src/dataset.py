@@ -2,6 +2,7 @@
 
 from typing import List, Dict, Optional
 import json
+import warnings
 from pathlib import Path
 
 import cv2
@@ -36,26 +37,22 @@ def read_video_frames(path: str, num_frames: int, start_index: Optional[int] = N
     else:
         start_index = max(0, min(start_index, total - 1))
 
-    end_index = start_index + num_frames
+    # Seek directly to start_index
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_index)
 
     frames = []
-    frame_id = 0
-    while cap.isOpened():
+    for _ in range(num_frames):
         ret, frame = cap.read()
         if not ret:
             break
-
-        if frame_id >= start_index and frame_id < end_index:
-            frames.append(frame[..., ::-1])  # BGR -> RGB
-
-        frame_id += 1
-        if frame_id >= end_index:
-            break
+        frames.append(frame[..., ::-1])  # BGR -> RGB
 
     cap.release()
 
     # Pad if fewer frames than needed
     if len(frames) < num_frames:
+        if len(frames) == 0:
+            return None
         last = frames[-1]
         frames += [last] * (num_frames - len(frames))
 
@@ -207,7 +204,6 @@ class InbetweenVideoDataset(Dataset):
                 }
             
             # If corrupted, log and continue to next attempt
-            import warnings
             warnings.warn(f"Skipping corrupted video (attempt {attempt+1}/{max_retries}): {vid_path}")
         
         # If all retries exhausted, raise error
