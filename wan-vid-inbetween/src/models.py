@@ -79,10 +79,6 @@ def add_lora_to_transformer(transformer, r, alpha, dropout, total_steps):
         "to_q",
         "to_k",
         "to_v",
-        "to_out.0",  # Attention output projection
-        # Cross-attention projections (for conditioning)
-        "add_k_proj",
-        "add_v_proj",
         # Feed-forward layers
         "ffn.net.0.proj",  # FFN input projection
         "ffn.net.2",       # FFN output projection

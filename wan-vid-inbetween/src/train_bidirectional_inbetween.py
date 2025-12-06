@@ -91,8 +91,8 @@ def main():
         cnn_feature_dim=cfg.get("cnn_feature_dim", 64),
         pretrained_fusion_mlp_path=cfg.get("pretrained_fusion_mlp_path", None),
         
-        # Sparse generation threshold
-        weight_threshold=cfg.get("weight_threshold", 0.3),
+        # Alternating training steps
+        alternating_steps=cfg.get("alternating_steps", 200),
         
         # Logging
         log_dir=cfg.get("log_dir", "./logs"),
@@ -123,7 +123,7 @@ def main():
         print(f"Fusion MLP weights: {train_cfg.pretrained_fusion_mlp_path} (frozen)")
     else:
         print(f"Fusion MLP weights: random init (WARNING: not recommended)")
-    print(f"Weight threshold: {train_cfg.weight_threshold}")
+    print(f"Alternating steps: {train_cfg.alternating_steps}")
     print("=" * 60 + "\n")
 
     trainer = BidirectionalInbetweenTrainer(train_cfg)

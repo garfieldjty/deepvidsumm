@@ -42,7 +42,7 @@ mid_frames: 60
 end_frames: 30
 
 # Hard-cut annotations (JSON: { "video_name.mp4": [cut_idx1, cut_idx2, ...], ... })
-cut_annotations_path: "/workspace/deepvidsumm/dep/clipshots/annotations/train_middle_frames.json"
+cut_annotations_path: "/workspace/deepvidsumm/wan-vid-inbetween/data/all.json"
 
 # If true, the dataset tries to sample windows centered around annotated cuts
 use_cut_focused_sampling: false
@@ -56,20 +56,28 @@ train_batch_size: 1
 gradient_accumulation_steps: 32
 
 num_train_steps: 10000
+# Learning rate: 1e-4 is standard for LoRA, 1e-3 causes divergence
 learning_rate: 1.0e-4
-seed: 68
+seed: 42
 
 output_dir: "./outputs/bidirectional_inbetween_lora"
 
 # LoRA config (single LoRA for both forward and backward)
-lora_r: 128
-lora_alpha: 256
-lora_dropout: 0
+# Reduced from 128/256 to 64/64 for stability (alpha/r ratio of 1 is safer)
+lora_r: 64
+lora_alpha: 128
+# Lower dropout for stability with gradient accumulation
+lora_dropout: 0.05
+
+# Alternating steps: how many steps to train each LoRA before switching
+# MUST be a multiple of gradient_accumulation_steps (32)
+# 192 = 6 full accumulation cycles per mode
+alternating_steps: 192
 
 # -------- Fusion MLP (Pre-trained, Frozen) --------
 # Path to the pre-trained fusion MLP weights
 # Train this first using train_fusion_mlp.py with fusion_mlp_config.yaml
-pretrained_fusion_mlp_path: "./outputs/fusion_mlp/fusion_mlp.pt"
+pretrained_fusion_mlp_path: "/workspace/deepvidsumm/wan-vid-inbetween/outputs_bk4/fusion_mlp/fusion_mlp.pt"
 
 # MLP architecture (must match the pre-trained model)
 fusion_hidden_dim: 256
@@ -93,6 +101,7 @@ log_every_n_steps: 10
 
 # -------- Checkpointing --------
 save_every_n_steps: 200
+# Set to null to start fresh, "latest" to resume, or a specific path
 resume_from_checkpoint: "latest"
 
 # -------- Inference Defaults (for convenience) --------

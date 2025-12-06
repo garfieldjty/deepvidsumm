@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from accelerate import Accelerator
 from tqdm.auto import tqdm
-from lion_pytorch import Lion
 
 from .utils_latents import retrieve_latents
 from .models import load_wan_components, add_lora_to_transformer
@@ -301,7 +300,7 @@ class InbetweenTrainer:
             p.requires_grad = ("lora_" in name)
 
         params = [p for p in self.transformer.parameters() if p.requires_grad]
-        self.optim = Lion(params, lr=cfg.learning_rate, weight_decay=1e-5)
+        self.optim = torch.optim.Adam(params, lr=cfg.learning_rate, weight_decay=1e-5)
 
         # Dataset
         dataset = InbetweenVideoDataset(
@@ -754,8 +753,8 @@ class BidirectionalTrainConfig:
     fusion_num_layers: int = 3
     cnn_feature_dim: int = 64  # Output feature dim from CNN spatial encoder
     pretrained_fusion_mlp_path: Optional[str] = None  # Path to pre-trained fusion MLP weights
-    # Sparse generation threshold
-    weight_threshold: float = 0.3  # Only generate fwd/bwd for frames with weight > threshold
+    # Alternating training settings
+    alternating_steps: int = 200  # Train each LoRA for this many steps before switching
 
 
 class BidirectionalInbetweenTrainer:
@@ -765,10 +764,9 @@ class BidirectionalInbetweenTrainer:
     This approach:
     1. Trains a "forward" LoRA to continue from start frames
     2. Trains a "backward" LoRA to generate missing beginning for end frames
-    3. Trains a Cumulative Softmax MLP to fuse the two predictions
+    3. Uses a pre-trained Cumulative Softmax MLP to fuse the two predictions at inference
     
-    The fusion weights are monotonic: forward contribution decreases while
-    backward contribution increases along the temporal axis.
+    Training alternates between the two LoRAs every N steps to avoid gradient conflicts.
     """
     
     def __init__(self, cfg: BidirectionalTrainConfig):
@@ -792,18 +790,37 @@ class BidirectionalInbetweenTrainer:
             attn_implementation=cfg.attn_implementation,
         )
 
-        # Single LoRA for both forward and backward passes
-        # The same model learns to continue from start AND lead into end
-        self.transformer = add_lora_to_transformer(
+        # Create FORWARD LoRA
+        self.transformer_fwd = add_lora_to_transformer(
             transformer_base,
             cfg.lora_r,
             cfg.lora_alpha,
             cfg.lora_dropout,
             cfg.num_train_steps,
         )
+        
+        # Create a fresh copy of the base transformer for backward LoRA
+        # Need to reload to get a separate instance
+        _, transformer_base_bwd, _ = load_wan_components(
+            cfg.base_model_path,
+            transformer_precision=cfg.transformer_precision,
+            vae_precision=cfg.vae_precision,
+            attn_implementation=cfg.attn_implementation,
+        )
+        
+        # Create BACKWARD LoRA
+        self.transformer_bwd = add_lora_to_transformer(
+            transformer_base_bwd,
+            cfg.lora_r,
+            cfg.lora_alpha,
+            cfg.lora_dropout,
+            cfg.num_train_steps,
+        )
 
-        # Freeze all except LoRA
-        for name, p in self.transformer.named_parameters():
+        # Freeze all except LoRA for both transformers
+        for name, p in self.transformer_fwd.named_parameters():
+            p.requires_grad = ("lora_" in name)
+        for name, p in self.transformer_bwd.named_parameters():
             p.requires_grad = ("lora_" in name)
 
         # Get latent channel dimension from VAE config
@@ -829,11 +846,13 @@ class BidirectionalInbetweenTrainer:
             if self.acc.is_local_main_process:
                 print(f"Loaded pre-trained fusion MLP from {cfg.pretrained_fusion_mlp_path} (frozen)")
 
-        # Collect trainable parameters (only LoRA, MLP is frozen)
-        params_lora = [p for p in self.transformer.parameters() if p.requires_grad]
+        # Collect trainable parameters for each LoRA
+        params_fwd = [p for p in self.transformer_fwd.parameters() if p.requires_grad]
+        params_bwd = [p for p in self.transformer_bwd.parameters() if p.requires_grad]
         
-        # Create optimizer with LoRA params only (MLP is frozen)
-        self.optim = Lion(params_lora, lr=cfg.learning_rate, weight_decay=1e-5)
+        # Create separate optimizers for each LoRA
+        self.optim_fwd = torch.optim.Adam(params_fwd, lr=cfg.learning_rate, weight_decay=1e-5)
+        self.optim_bwd = torch.optim.Adam(params_bwd, lr=cfg.learning_rate, weight_decay=1e-5)
 
         # Dataset
         dataset = InbetweenVideoDataset(
@@ -862,22 +881,27 @@ class BidirectionalInbetweenTrainer:
 
         # Prepare with accelerator
         (
-            self.transformer, 
+            self.transformer_fwd,
+            self.transformer_bwd,
             self.fusion_mlp,
-            self.optim, 
+            self.optim_fwd,
+            self.optim_bwd,
             self.dl
         ) = self.acc.prepare(
-            self.transformer, 
+            self.transformer_fwd,
+            self.transformer_bwd,
             self.fusion_mlp,
-            self.optim, 
+            self.optim_fwd,
+            self.optim_bwd,
             self.dl
         )
         
         # Move VAE to device manually
         self.vae = self.vae.to(self.acc.device)
         
-        # Cache unwrapped reference
-        self._unwrapped_transformer = self.acc.unwrap_model(self.transformer)
+        # Cache unwrapped references
+        self._unwrapped_transformer_fwd = self.acc.unwrap_model(self.transformer_fwd)
+        self._unwrapped_transformer_bwd = self.acc.unwrap_model(self.transformer_bwd)
 
         # Pre-compute latent normalization tensors
         self.latents_mean = None
@@ -888,15 +912,17 @@ class BidirectionalInbetweenTrainer:
             num_gpus = self.acc.num_processes
             effective_batch = cfg.train_batch_size * num_gpus * cfg.gradient_accumulation_steps
             print(f"\n{'='*60}")
-            print("BIDIRECTIONAL INBETWEENING TRAINER (Single LoRA)")
+            print("BIDIRECTIONAL INBETWEENING TRAINER (Separate LoRAs)")
             print(f"{'='*60}")
             print(f"Training on {num_gpus} GPU(s)")
             print(f"  Per-GPU batch size: {cfg.train_batch_size}")
             print(f"  Gradient accumulation steps: {cfg.gradient_accumulation_steps}")
             print(f"  Effective batch size: {effective_batch}")
-            print(f"  LoRA params: {sum(p.numel() for p in params_lora):,}")
+            print(f"  Forward LoRA params: {sum(p.numel() for p in params_fwd):,}")
+            print(f"  Backward LoRA params: {sum(p.numel() for p in params_bwd):,}")
             fusion_mlp_params = sum(p.numel() for p in self.fusion_mlp.parameters())
             print(f"  Fusion MLP params: {fusion_mlp_params:,} ({'frozen' if self.fusion_mlp_frozen else 'trainable'})")
+            print(f"  Alternating every: {cfg.alternating_steps} steps")
             print(f"  Attention: {cfg.attn_implementation}")
             print(f"{'='*60}\n")
 
@@ -926,23 +952,28 @@ class BidirectionalInbetweenTrainer:
         return t
 
     def save_checkpoint(self, step: int):
-        """Save checkpoint with LoRA and fusion MLP."""
+        """Save checkpoint with both LoRAs and fusion MLP."""
         if not self.acc.is_local_main_process:
             return
 
         checkpoint_path = self.checkpoint_dir / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
-        # Save LoRA (single model for both forward and backward)
-        unwrapped = self.acc.unwrap_model(self.transformer)
-        unwrapped.save_pretrained(checkpoint_path / "lora")
+        # Save forward LoRA
+        unwrapped_fwd = self.acc.unwrap_model(self.transformer_fwd)
+        unwrapped_fwd.save_pretrained(checkpoint_path / "lora_fwd")
+
+        # Save backward LoRA
+        unwrapped_bwd = self.acc.unwrap_model(self.transformer_bwd)
+        unwrapped_bwd.save_pretrained(checkpoint_path / "lora_bwd")
 
         # Save fusion MLP
         fusion_mlp_unwrapped = self.acc.unwrap_model(self.fusion_mlp)
         torch.save(fusion_mlp_unwrapped.state_dict(), checkpoint_path / "fusion_mlp.pt")
 
-        # Save optimizer state
-        torch.save(self.optim.state_dict(), checkpoint_path / "optimizer.pt")
+        # Save optimizer states
+        torch.save(self.optim_fwd.state_dict(), checkpoint_path / "optimizer_fwd.pt")
+        torch.save(self.optim_bwd.state_dict(), checkpoint_path / "optimizer_bwd.pt")
 
         # Save training state
         state = {
@@ -953,6 +984,7 @@ class BidirectionalInbetweenTrainer:
                 "lora_r": self.cfg.lora_r,
                 "lora_alpha": self.cfg.lora_alpha,
                 "fusion_hidden_dim": self.cfg.fusion_hidden_dim,
+                "alternating_steps": self.cfg.alternating_steps,
             }
         }
         with open(checkpoint_path / "training_state.json", "w") as f:
@@ -987,12 +1019,19 @@ class BidirectionalInbetweenTrainer:
             self.global_step = state["global_step"]
             print(f"Resuming from step {self.global_step}")
 
-        # Load LoRA
-        lora_path = checkpoint_path / "lora"
-        if lora_path.exists():
-            unwrapped = self.acc.unwrap_model(self.transformer)
-            unwrapped.load_adapter(str(lora_path), adapter_name="default")
-            print(f"Loaded LoRA from {lora_path}")
+        # Load forward LoRA
+        lora_fwd_path = checkpoint_path / "lora_fwd"
+        if lora_fwd_path.exists():
+            unwrapped_fwd = self.acc.unwrap_model(self.transformer_fwd)
+            unwrapped_fwd.load_adapter(str(lora_fwd_path), adapter_name="default")
+            print(f"Loaded forward LoRA from {lora_fwd_path}")
+
+        # Load backward LoRA
+        lora_bwd_path = checkpoint_path / "lora_bwd"
+        if lora_bwd_path.exists():
+            unwrapped_bwd = self.acc.unwrap_model(self.transformer_bwd)
+            unwrapped_bwd.load_adapter(str(lora_bwd_path), adapter_name="default")
+            print(f"Loaded backward LoRA from {lora_bwd_path}")
 
         # Load fusion MLP
         fusion_path = checkpoint_path / "fusion_mlp.pt"
@@ -1002,12 +1041,18 @@ class BidirectionalInbetweenTrainer:
             fusion_mlp_unwrapped.load_state_dict(fusion_state)
             print(f"Loaded fusion MLP from {fusion_path}")
 
-        # Load optimizer state
-        optim_path = checkpoint_path / "optimizer.pt"
-        if optim_path.exists():
-            optim_state = torch.load(optim_path, map_location=self.acc.device)
-            self.optim.load_state_dict(optim_state)
-            print(f"Loaded optimizer state from {optim_path}")
+        # Load optimizer states
+        optim_fwd_path = checkpoint_path / "optimizer_fwd.pt"
+        if optim_fwd_path.exists():
+            optim_state = torch.load(optim_fwd_path, map_location=self.acc.device)
+            self.optim_fwd.load_state_dict(optim_state)
+            print(f"Loaded forward optimizer state from {optim_fwd_path}")
+
+        optim_bwd_path = checkpoint_path / "optimizer_bwd.pt"
+        if optim_bwd_path.exists():
+            optim_state = torch.load(optim_bwd_path, map_location=self.acc.device)
+            self.optim_bwd.load_state_dict(optim_state)
+            print(f"Loaded backward optimizer state from {optim_bwd_path}")
 
     def get_latest_checkpoint(self) -> Optional[Path]:
         """Find the latest checkpoint."""
@@ -1020,22 +1065,19 @@ class BidirectionalInbetweenTrainer:
 
     def train(self):
         """
-        Main training loop for bidirectional inbetweening with sparse generation.
+        Main training loop for bidirectional inbetweening with alternating LoRAs.
         
         Training procedure:
         1. Encode video segments (start, mid, end) to latents
-        2. Predict fusion weights from start/end latents via MLP
-        3. Compute GT weights from latent similarity (mid to start/end)
-        4. Train fusion MLP with weight prediction loss
-        5. Only generate fwd/bwd for frames where weight > threshold (sparse)
-        6. Compute velocity losses for generated frames
+        2. Alternate every N steps between:
+           - Forward LoRA: [start, noisy_mid] -> predict mid velocity
+           - Backward LoRA: [noisy_mid, end] -> predict mid velocity
         
-        Note: Single LoRA is used for both forward and backward passes.
+        Each LoRA is trained separately to avoid gradient conflicts.
         """
         device = self.acc.device
-        self.transformer.train()
-        # Fusion MLP is frozen - keep in eval mode for consistent behavior
-        self.fusion_mlp.eval()
+        self.transformer_fwd.train()
+        self.transformer_bwd.train()
         self.vae.eval()
 
         # Resume from checkpoint if specified
@@ -1063,18 +1105,44 @@ class BidirectionalInbetweenTrainer:
             desc="Bidirectional Training"
         )
 
-        # Loss tracking
-        running_losses = {"total": 0.0, "fwd": 0.0, "bwd": 0.0}
-        running_stats = {"fwd_frames": 0.0, "bwd_frames": 0.0}
-        loss_count = 0
+        # Loss tracking (separate counts for each mode)
+        running_losses = {"fwd": 0.0, "bwd": 0.0}
+        loss_counts = {"fwd": 0, "bwd": 0}
         
-        # Weight threshold for sparse generation
-        threshold = self.cfg.weight_threshold
+        # Alternating training parameters
+        # IMPORTANT: alternating_steps must be a multiple of gradient_accumulation_steps
+        # to ensure clean gradient accumulation windows
+        alternating_steps = self.cfg.alternating_steps
+        grad_acc_steps = self.cfg.gradient_accumulation_steps
+        if alternating_steps % grad_acc_steps != 0:
+            # Round up to nearest multiple
+            alternating_steps = ((alternating_steps // grad_acc_steps) + 1) * grad_acc_steps
+            if self.acc.is_local_main_process:
+                print(f"⚠️  Adjusted alternating_steps to {alternating_steps} (multiple of grad_acc_steps={grad_acc_steps})")
+        
+        # Track which phase we're in (forward vs backward) based on completed accumulation cycles
+        # Instead of switching every step, we switch after completing alternating_steps worth of steps
+        def get_training_mode(s):
+            # Each alternating_steps, we switch
+            cycle_position = s % (2 * alternating_steps)
+            return cycle_position < alternating_steps  # True = forward, False = backward
 
         while step < self.cfg.num_train_steps:
             for batch in self.dl:
-                # Only accumulate on transformer (fusion_mlp is frozen)
-                with self.acc.accumulate(self.transformer):
+                # Determine which LoRA to train this step
+                training_fwd = get_training_mode(step)
+                
+                # Select the appropriate transformer and optimizer
+                if training_fwd:
+                    active_transformer = self.transformer_fwd
+                    active_optim = self.optim_fwd
+                    unwrapped_transformer = self._unwrapped_transformer_fwd
+                else:
+                    active_transformer = self.transformer_bwd
+                    active_optim = self.optim_bwd
+                    unwrapped_transformer = self._unwrapped_transformer_bwd
+                
+                with self.acc.accumulate(active_transformer):
                     # Video: [B, T, C, H, W] -> [B, C, T, H, W]
                     video = batch["video"].to(device, non_blocking=True)
                     video = video.permute(0, 2, 1, 3, 4)
@@ -1101,9 +1169,9 @@ class BidirectionalInbetweenTrainer:
                         end_lat = retrieve_latents(enc_end)
                         
                         # Convert to transformer dtype
-                        start_lat = start_lat.to(self._unwrapped_transformer.dtype)
-                        mid_lat = mid_lat.to(self._unwrapped_transformer.dtype)
-                        end_lat = end_lat.to(self._unwrapped_transformer.dtype)
+                        start_lat = start_lat.to(unwrapped_transformer.dtype)
+                        mid_lat = mid_lat.to(unwrapped_transformer.dtype)
+                        end_lat = end_lat.to(unwrapped_transformer.dtype)
 
                         # Normalize latents
                         if self.latents_mean is None:
@@ -1126,55 +1194,32 @@ class BidirectionalInbetweenTrainer:
                     _, C, T_start_lat, H, W = start_lat.shape
                     _, _, T_mid_lat, _, _ = mid_lat.shape
                     _, _, T_end_lat, _, _ = end_lat.shape
-
-                    # =========================================================
-                    # STEP 1: Predict fusion weights from start/end latents
-                    # =========================================================
-                    with torch.no_grad():
-                        # MLP is frozen, so no gradients needed
-                        w_fwd_pred, w_bwd_pred = self.fusion_mlp(start_lat, end_lat, T_mid_lat)
-                    # w_fwd_pred, w_bwd_pred: [B, T_mid_lat]
-                    
-                    # =========================================================
-                    # STEP 2: Determine which frames to generate for each model
-                    # Forward model: generate frames where w_fwd > threshold
-                    # Backward model: generate frames where w_bwd > threshold
-                    # =========================================================
-                    # Mask per frame: [B, T_mid_lat]
-                    fwd_mask = w_fwd_pred > threshold  # frames where forward should contribute
-                    bwd_mask = w_bwd_pred > threshold  # frames where backward should contribute
-                    
-                    # Track statistics
-                    num_fwd_frames = fwd_mask.float().sum().item()
-                    num_bwd_frames = bwd_mask.float().sum().item()
                     
                     # Sample timestep and add noise to mid
                     noise = torch.randn_like(mid_lat)
+                    # Use power=0.5 to bias toward cleaner samples (matches original trainer)
                     t = self._sample_timesteps(B, device, power=0.5)
                     t_normalized = t.view(B, 1, 1, 1, 1) / self.scheduler.config.num_train_timesteps
                     noisy_mid = (1 - t_normalized) * mid_lat + t_normalized * noise
 
                     # Dummy text embeddings
                     enc_state = torch.zeros(
-                        B, 1, self._unwrapped_transformer.config.text_dim,
+                        B, 1, unwrapped_transformer.config.text_dim,
                         device=device,
-                        dtype=self._unwrapped_transformer.dtype,
+                        dtype=unwrapped_transformer.dtype,
                     )
 
                     # Flow matching target: velocity = noise - x_0
                     target = noise - mid_lat
 
-                    # Initialize losses
-                    loss_fwd = None
-                    loss_bwd = None
+                    # Initialize loss values for logging
                     loss_fwd_value = 0.0
                     loss_bwd_value = 0.0
 
-                    # =========================================================
-                    # STEP 5: Forward pass (only if any frame needs it)
-                    # Uses same LoRA with [start, noisy_mid] input
-                    # =========================================================
-                    if fwd_mask.any():
+                    if training_fwd:
+                        # =========================================================
+                        # Forward LoRA training: [start, noisy_mid] -> predict mid
+                        # =========================================================
                         latents_fwd = torch.cat([start_lat, noisy_mid], dim=2)
                         T_fwd = T_start_lat + T_mid_lat
                         
@@ -1182,7 +1227,7 @@ class BidirectionalInbetweenTrainer:
                         mask_fwd = torch.zeros(B, T_fwd, device=device, dtype=torch.bool)
                         mask_fwd[:, :T_start_lat] = True
 
-                        pred_fwd = self.transformer(
+                        pred_fwd = active_transformer(
                             hidden_states=latents_fwd,
                             timestep=t,
                             encoder_hidden_states=enc_state,
@@ -1193,22 +1238,16 @@ class BidirectionalInbetweenTrainer:
                         # Extract mid prediction: [B, C, T_mid_lat, H, W]
                         pred_mid_fwd = pred_fwd[:, :, T_start_lat:]
                         
-                        # Compute weighted loss only for frames where w_fwd > threshold
-                        # Weight by the actual predicted weight (higher weight = more responsibility)
-                        fwd_sq_error = (pred_mid_fwd.float() - target.float()) ** 2
-                        # Use mean over C, H, W dimensions per frame, then weight by fwd_weights
-                        fwd_sq_error_per_frame = fwd_sq_error.mean(dim=(1, 3, 4))  # [B, T_mid_lat]
-                        fwd_mask_2d = fwd_mask.float()   # [B, T_mid_lat]
-                        # Normalize by sum of weights (not count) for proper averaging
-                        weight_sum_fwd = (w_fwd_pred.detach() * fwd_mask_2d).sum() + 1e-8
-                        loss_fwd = (fwd_sq_error_per_frame * w_fwd_pred.detach() * fwd_mask_2d).sum() / weight_sum_fwd
-                        loss_fwd_value = loss_fwd.detach().item()
-
-                    # =========================================================
-                    # STEP 6: Backward pass (only if any frame needs it)
-                    # Uses same LoRA with [noisy_mid, end] input
-                    # =========================================================
-                    if bwd_mask.any():
+                        # Simple MSE loss
+                        loss = torch.nn.functional.mse_loss(pred_mid_fwd.float(), target.float())
+                        loss_fwd_value = loss.detach().item()
+                        
+                        self.acc.backward(loss)
+                        del latents_fwd, pred_fwd, pred_mid_fwd, loss
+                    else:
+                        # =========================================================
+                        # Backward LoRA training: [noisy_mid, end] -> predict mid
+                        # =========================================================
                         latents_bwd = torch.cat([noisy_mid, end_lat], dim=2)
                         T_bwd = T_mid_lat + T_end_lat
                         
@@ -1216,7 +1255,7 @@ class BidirectionalInbetweenTrainer:
                         mask_bwd = torch.zeros(B, T_bwd, device=device, dtype=torch.bool)
                         mask_bwd[:, T_mid_lat:] = True
 
-                        pred_bwd_full = self.transformer(
+                        pred_bwd = active_transformer(
                             hidden_states=latents_bwd,
                             timestep=t,
                             encoder_hidden_states=enc_state,
@@ -1225,88 +1264,58 @@ class BidirectionalInbetweenTrainer:
                         ).sample
 
                         # Extract mid prediction: [B, C, T_mid_lat, H, W]
-                        pred_mid_bwd = pred_bwd_full[:, :, :T_mid_lat]
+                        pred_mid_bwd = pred_bwd[:, :, :T_mid_lat]
                         
-                        # Compute weighted loss only for frames where w_bwd > threshold
-                        bwd_mask_2d = bwd_mask.float()   # [B, T_mid_lat]
+                        # Simple MSE loss
+                        loss = torch.nn.functional.mse_loss(pred_mid_bwd.float(), target.float())
+                        loss_bwd_value = loss.detach().item()
                         
-                        bwd_sq_error = (pred_mid_bwd.float() - target.float()) ** 2
-                        # Use mean over C, H, W dimensions per frame, then weight by bwd_weights
-                        bwd_sq_error_per_frame = bwd_sq_error.mean(dim=(1, 3, 4))  # [B, T_mid_lat]
-                        # Normalize by sum of weights (not count) for proper averaging
-                        weight_sum_bwd = (w_bwd_pred.detach() * bwd_mask_2d).sum() + 1e-8
-                        loss_bwd = (bwd_sq_error_per_frame * w_bwd_pred.detach() * bwd_mask_2d).sum() / weight_sum_bwd
-                        loss_bwd_value = loss_bwd.detach().item()
+                        self.acc.backward(loss)
+                        del latents_bwd, pred_bwd, pred_mid_bwd, loss
 
-                    # =========================================================
-                    # STEP 7: Combined backward pass
-                    # Compute gradients for both forward and backward losses together
-                    # =========================================================
-                    # Build total loss - start from a tensor that can accumulate grads
-                    if loss_fwd is not None and loss_bwd is not None:
-                        total_loss = loss_fwd + loss_bwd
-                        self.acc.backward(total_loss)
-                    elif loss_fwd is not None:
-                        total_loss = loss_fwd
-                        self.acc.backward(total_loss)
-                    elif loss_bwd is not None:
-                        total_loss = loss_bwd
-                        self.acc.backward(total_loss)
-                    else:
-                        # Edge case: no frames passed threshold for either direction
-                        # Skip backward, just zero grad (should rarely happen with threshold=0.3)
-                        pass
-
-                    self.optim.step()
-                    self.optim.zero_grad()
-
-                    # Total loss for logging
-                    loss_total_value = loss_fwd_value + loss_bwd_value
+                    # Gradient clipping to prevent exploding gradients
+                    if self.acc.sync_gradients:
+                        self.acc.clip_grad_norm_(active_transformer.parameters(), max_norm=1.0)
+                    
+                    # Optimizer step for active LoRA only
+                    active_optim.step()
+                    active_optim.zero_grad()
 
                     step += 1
                     pbar.update(1)
 
-                    # Track losses
-                    running_losses["total"] += loss_total_value
-                    running_losses["fwd"] += loss_fwd_value
-                    running_losses["bwd"] += loss_bwd_value
-                    running_stats["fwd_frames"] += num_fwd_frames
-                    running_stats["bwd_frames"] += num_bwd_frames
-                    loss_count += 1
+                    # Track losses (only update the active mode's counter)
+                    if training_fwd:
+                        running_losses["fwd"] += loss_fwd_value
+                        loss_counts["fwd"] += 1
+                    else:
+                        running_losses["bwd"] += loss_bwd_value
+                        loss_counts["bwd"] += 1
 
                     # TensorBoard logging
                     if self.writer and step % self.cfg.log_every_n_steps == 0:
                         if self.acc.is_local_main_process:
-                            avg_total = running_losses["total"] / loss_count
-                            avg_fwd = running_losses["fwd"] / loss_count
-                            avg_bwd = running_losses["bwd"] / loss_count
-                            avg_fwd_frames = running_stats["fwd_frames"] / loss_count
-                            avg_bwd_frames = running_stats["bwd_frames"] / loss_count
+                            # Compute averages only if we have samples
+                            avg_fwd = running_losses["fwd"] / max(loss_counts["fwd"], 1)
+                            avg_bwd = running_losses["bwd"] / max(loss_counts["bwd"], 1)
                             
-                            self.writer.add_scalar("train/loss_total", avg_total, step)
-                            self.writer.add_scalar("train/loss_forward", avg_fwd, step)
-                            self.writer.add_scalar("train/loss_backward", avg_bwd, step)
+                            # Only log if we have actual samples for that mode
+                            if loss_counts["fwd"] > 0:
+                                self.writer.add_scalar("train/loss_forward", avg_fwd, step)
+                            if loss_counts["bwd"] > 0:
+                                self.writer.add_scalar("train/loss_backward", avg_bwd, step)
                             self.writer.add_scalar("train/timestep_mean", t.mean().item(), step)
+                            self.writer.add_scalar("train/training_fwd", 1.0 if training_fwd else 0.0, step)
                             
-                            # Log sparsity statistics
-                            self.writer.add_scalar("train/avg_fwd_frames", avg_fwd_frames, step)
-                            self.writer.add_scalar("train/avg_bwd_frames", avg_bwd_frames, step)
-                            
-                            # Log weight prediction quality
-                            w_fwd_mean = w_fwd_pred.mean().item()
-                            w_bwd_mean = w_bwd_pred.mean().item()
-                            self.writer.add_scalar("train/w_fwd_pred_mean", w_fwd_mean, step)
-                            self.writer.add_scalar("train/w_bwd_pred_mean", w_bwd_mean, step)
-                            
+                            mode_str = "FWD" if training_fwd else "BWD"
+                            current_loss = loss_fwd_value if training_fwd else loss_bwd_value
                             pbar.set_postfix({
-                                "loss": f"{avg_total:.4f}",
-                                "fwd": f"{avg_fwd:.4f}",
-                                "bwd": f"{avg_bwd:.4f}",
+                                "mode": mode_str,
+                                "loss": f"{current_loss:.4f}",
                             })
                         
                         running_losses = {k: 0.0 for k in running_losses}
-                        running_stats = {k: 0.0 for k in running_stats}
-                        loss_count = 0
+                        loss_counts = {k: 0 for k in loss_counts}
 
                     # Save checkpoint periodically
                     if step % self.cfg.save_every_n_steps == 0:
@@ -1329,7 +1338,8 @@ class BidirectionalInbetweenTrainer:
             output_path = Path(self.cfg.output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
             
-            self.acc.unwrap_model(self.transformer).save_pretrained(output_path / "lora")
+            self.acc.unwrap_model(self.transformer_fwd).save_pretrained(output_path / "lora_fwd")
+            self.acc.unwrap_model(self.transformer_bwd).save_pretrained(output_path / "lora_bwd")
             torch.save(
                 self.acc.unwrap_model(self.fusion_mlp).state_dict(), 
                 output_path / "fusion_mlp.pt"

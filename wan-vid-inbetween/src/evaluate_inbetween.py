@@ -358,6 +358,8 @@ def evaluate_single_cut(
     vae_precision: str = "fp32",
     accelerator: Accelerator = None,
     # Bidirectional model parameters
+    lora_fwd_path: Optional[str] = None,
+    lora_bwd_path: Optional[str] = None,
     fusion_mlp_path: Optional[str] = None,
     attn_implementation: str = "sdpa",
     fusion_hidden_dim: int = 256,
@@ -374,7 +376,7 @@ def evaluate_single_cut(
         mid_duration: Number of frames to generate (ground truth exists)
         end_duration: Number of frames after cut to use as conditioning
         base_model_path: Path to base model
-        lora_path: Path to LoRA weights
+        lora_path: Path to LoRA weights (for unidirectional model)
         output_dir: Directory to save outputs
         video_name: Name of the video (for output files)
         cut_idx: Index of this cut in the video
@@ -384,6 +386,8 @@ def evaluate_single_cut(
         out_fps: Output FPS
         transformer_precision: Transformer precision
         vae_precision: VAE precision
+        lora_fwd_path: Path to forward LoRA weights (for bidirectional model)
+        lora_bwd_path: Path to backward LoRA weights (for bidirectional model)
         fusion_mlp_path: Path to fusion MLP weights (if using bidirectional model)
         attn_implementation: Attention implementation ("sdpa", "flash_attention_2", "eager")
         fusion_hidden_dim: Hidden dim of fusion MLP (if bidirectional)
@@ -393,8 +397,9 @@ def evaluate_single_cut(
     Returns:
         Dictionary with evaluation metrics
     """
-    # Determine if using bidirectional model
-    use_bidirectional = fusion_mlp_path is not None
+    # Determine if using bidirectional model (requires both LoRAs and fusion MLP)
+    use_bidirectional = (lora_fwd_path is not None and lora_bwd_path is not None 
+                         and fusion_mlp_path is not None)
     
     # Create output subdirectory for this cut
     cut_output_dir = os.path.join(output_dir, f"{video_name}_cut{cut_idx}")
@@ -445,10 +450,12 @@ def evaluate_single_cut(
         generated_video_path = os.path.join(cut_output_dir, "generated_full.mp4")
         
         if use_bidirectional:
-            # Use bidirectional model
-            generate_bidirectional_inbetween_from_two_videos(
+            # Use bidirectional model with separate forward/backward LoRAs
+            # Also generate unfused outputs for inspection
+            result = generate_bidirectional_inbetween_from_two_videos(
                 base_model_path=base_model_path,
-                lora_path=lora_path,
+                lora_fwd_path=lora_fwd_path,
+                lora_bwd_path=lora_bwd_path,
                 fusion_mlp_path=fusion_mlp_path,
                 start_video_path=video_path,
                 start_frame_index=max(0, start_frame_idx),
@@ -468,9 +475,15 @@ def evaluate_single_cut(
                 fusion_num_layers=fusion_num_layers,
                 cnn_feature_dim=cnn_feature_dim,
                 output_path=generated_video_path,
+                generate_unfused=True,
             )
+            # Result is a dict with 'fused', 'forward_only', 'backward_only' paths
+            fwd_only_path = result.get('forward_only')
+            bwd_only_path = result.get('backward_only')
         else:
             # Use standard unidirectional model
+            fwd_only_path = None
+            bwd_only_path = None
             generate_inbetween_from_two_videos(
                 base_model_path=base_model_path,
                 lora_path=lora_path,
@@ -533,6 +546,34 @@ def evaluate_single_cut(
             height
         )
         
+        # For bidirectional model, also compute metrics on unfused outputs
+        metrics_fwd_only = None
+        metrics_bwd_only = None
+        if use_bidirectional and fwd_only_path and bwd_only_path:
+            # Extract middle frames from forward-only output
+            fwd_only_all_frames = extract_frames_from_video(
+                fwd_only_path, start_duration, mid_duration
+            )
+            if len(fwd_only_all_frames) > 0:
+                fwd_only_mid_path = os.path.join(cut_output_dir, "generated_middle_forward_only.mp4")
+                save_video_clip(fwd_only_all_frames, fwd_only_mid_path, out_fps)
+                print(f"    Computing forward-only metrics...")
+                metrics_fwd_only = compute_metrics_with_ffmpeg(
+                    gt_video_path, fwd_only_mid_path, width, height
+                )
+            
+            # Extract middle frames from backward-only output
+            bwd_only_all_frames = extract_frames_from_video(
+                bwd_only_path, start_duration, mid_duration
+            )
+            if len(bwd_only_all_frames) > 0:
+                bwd_only_mid_path = os.path.join(cut_output_dir, "generated_middle_backward_only.mp4")
+                save_video_clip(bwd_only_all_frames, bwd_only_mid_path, out_fps)
+                print(f"    Computing backward-only metrics...")
+                metrics_bwd_only = compute_metrics_with_ffmpeg(
+                    gt_video_path, bwd_only_mid_path, width, height
+                )
+        
         # Save conditioning frames for reference
         start_frames = extract_frames_from_video(
             video_path,
@@ -557,7 +598,7 @@ def evaluate_single_cut(
         )
         
         # Return metrics
-        return {
+        result = {
             "video_name": video_name,
             "cut_idx": cut_idx,
             "cut_frame": cut_frame,
@@ -567,6 +608,18 @@ def evaluate_single_cut(
             "vmaf": metrics["vmaf"],
             "output_dir": cut_output_dir,
         }
+        
+        # Add unfused metrics if available
+        if metrics_fwd_only:
+            result["ssim_fwd_only"] = metrics_fwd_only["ssim"]
+            result["psnr_fwd_only"] = metrics_fwd_only["psnr"]
+            result["vmaf_fwd_only"] = metrics_fwd_only["vmaf"]
+        if metrics_bwd_only:
+            result["ssim_bwd_only"] = metrics_bwd_only["ssim"]
+            result["psnr_bwd_only"] = metrics_bwd_only["psnr"]
+            result["vmaf_bwd_only"] = metrics_bwd_only["vmaf"]
+        
+        return result
         
     except Exception as e:
         print(f"  Error evaluating cut {cut_idx}: {e}")
@@ -598,8 +651,26 @@ def main():
     parser.add_argument(
         "--lora_path",
         type=str,
-        required=True,
-        help="Path to trained LoRA weights",
+        default=None,
+        help="Path to trained LoRA weights (for unidirectional model)",
+    )
+    parser.add_argument(
+        "--lora_fwd_path",
+        type=str,
+        default=None,
+        help="Path to forward LoRA weights (for bidirectional model)",
+    )
+    parser.add_argument(
+        "--lora_bwd_path",
+        type=str,
+        default=None,
+        help="Path to backward LoRA weights (for bidirectional model)",
+    )
+    parser.add_argument(
+        "--fusion_mlp_path",
+        type=str,
+        default=None,
+        help="Path to fusion MLP weights (for bidirectional model)",
     )
     parser.add_argument(
         "--output_dir",
@@ -637,13 +708,6 @@ def main():
         default=None,
         help="Maximum number of cuts per video to evaluate",
     )
-    # Bidirectional model arguments
-    parser.add_argument(
-        "--fusion_mlp_path",
-        type=str,
-        default=None,
-        help="Path to fusion MLP weights (enables bidirectional mode)",
-    )
     parser.add_argument(
         "--attn_implementation",
         type=str,
@@ -672,8 +736,21 @@ def main():
     
     args = parser.parse_args()
     
-    # Check if using bidirectional mode
-    use_bidirectional = args.fusion_mlp_path is not None
+    # Check if using bidirectional mode (requires all three paths)
+    use_bidirectional = (args.lora_fwd_path is not None and 
+                         args.lora_bwd_path is not None and 
+                         args.fusion_mlp_path is not None)
+    
+    # Validate: either unidirectional (lora_path) or bidirectional (fwd+bwd+fusion) required
+    if use_bidirectional:
+        # Bidirectional mode - don't need lora_path
+        pass
+    elif args.lora_path is not None:
+        # Unidirectional mode
+        pass
+    else:
+        parser.error("Either --lora_path (for unidirectional) OR "
+                     "--lora_fwd_path + --lora_bwd_path + --fusion_mlp_path (for bidirectional) is required")
     
     # Initialize accelerator for multi-GPU support
     accelerator = Accelerator()
@@ -695,9 +772,12 @@ def main():
     if accelerator.is_main_process:
         print(f"Loading cut annotations from: {args.cut_annotations}")
         if use_bidirectional:
-            print(f"Using BIDIRECTIONAL model with fusion MLP: {args.fusion_mlp_path}")
+            print(f"Using BIDIRECTIONAL model:")
+            print(f"  Forward LoRA: {args.lora_fwd_path}")
+            print(f"  Backward LoRA: {args.lora_bwd_path}")
+            print(f"  Fusion MLP: {args.fusion_mlp_path}")
         else:
-            print(f"Using STANDARD (unidirectional) model")
+            print(f"Using STANDARD (unidirectional) model: {args.lora_path}")
     
     with open(args.cut_annotations, 'r') as f:
         cut_annotations = json.load(f)
@@ -784,6 +864,8 @@ def main():
                 vae_precision=vae_precision,
                 accelerator=accelerator,
                 # Bidirectional model parameters
+                lora_fwd_path=args.lora_fwd_path,
+                lora_bwd_path=args.lora_bwd_path,
                 fusion_mlp_path=args.fusion_mlp_path,
                 attn_implementation=args.attn_implementation,
                 fusion_hidden_dim=args.fusion_hidden_dim,

@@ -4,7 +4,7 @@ Inference script for video inbetweening.
 
 Supports both:
 - Standard (unidirectional) model: uses --lora_path only
-- Bidirectional model: uses --lora_path + --fusion_mlp_path
+- Bidirectional model: uses --lora_fwd_path + --lora_bwd_path + --fusion_mlp_path
 
 Examples:
     # Standard model
@@ -13,7 +13,9 @@ Examples:
         --end_video_path video.mp4 --end_frame_index 90 --end_duration 30
     
     # Bidirectional model  
-    python -m src.run_inference_inbetween --lora_path ./outputs/bidirectional_lora/lora \\
+    python -m src.run_inference_inbetween \\
+        --lora_fwd_path ./outputs/bidirectional_lora/lora_fwd \\
+        --lora_bwd_path ./outputs/bidirectional_lora/lora_bwd \\
         --fusion_mlp_path ./outputs/bidirectional_lora/fusion_mlp.pt \\
         --start_video_path video.mp4 --start_frame_index 0 --start_duration 30 \\
         --end_video_path video.mp4 --end_frame_index 90 --end_duration 30
@@ -40,7 +42,9 @@ def main():
     )
     
     # Required parameters (can override config)
-    parser.add_argument("--lora_path", type=str, help="Path to trained LoRA weights")
+    parser.add_argument("--lora_path", type=str, help="Path to trained LoRA weights (for standard/unidirectional model)")
+    parser.add_argument("--lora_fwd_path", type=str, help="Path to forward LoRA weights (for bidirectional model)")
+    parser.add_argument("--lora_bwd_path", type=str, help="Path to backward LoRA weights (for bidirectional model)")
     parser.add_argument("--start_video_path", type=str, help="Path to first/start video")
     parser.add_argument("--start_frame_index", type=int, help="Starting frame index in start video")
     parser.add_argument("--start_duration", type=int, help="Number of frames to use from start video")
@@ -97,8 +101,16 @@ def main():
     # Initialize accelerator for distributed inference support
     accelerator = Accelerator()
     
-    # Check if using bidirectional mode
+    # Check if using bidirectional mode (requires both lora_fwd_path and lora_bwd_path, plus fusion_mlp_path)
     use_bidirectional = args.fusion_mlp_path is not None
+    
+    # Validate LoRA paths based on mode
+    if use_bidirectional:
+        if args.lora_fwd_path is None or args.lora_bwd_path is None:
+            raise ValueError("Bidirectional mode (--fusion_mlp_path set) requires both --lora_fwd_path and --lora_bwd_path")
+    else:
+        if args.lora_path is None:
+            raise ValueError("Standard mode requires --lora_path")
     
     # Load config file
     cfg = load_config(args.config)
@@ -106,9 +118,7 @@ def main():
     # Get inference defaults from config
     inference_cfg = cfg.get("inference", {})
     
-    # Required parameters: prioritize CLI args, then fail if missing
-    if args.lora_path is None:
-        raise ValueError("--lora_path is required")
+    # Required parameters: video paths and indices
     if args.start_video_path is None:
         raise ValueError("--start_video_path is required")
     if args.start_frame_index is None:
@@ -140,9 +150,12 @@ def main():
         print(f"Mode: {'BIDIRECTIONAL' if use_bidirectional else 'STANDARD (unidirectional)'}")
         print(f"Config: {args.config}")
         print(f"Base model: {base_model_path}")
-        print(f"LoRA path: {args.lora_path}")
         if use_bidirectional:
+            print(f"LoRA forward: {args.lora_fwd_path}")
+            print(f"LoRA backward: {args.lora_bwd_path}")
             print(f"Fusion MLP: {args.fusion_mlp_path}")
+        else:
+            print(f"LoRA path: {args.lora_path}")
         print(f"Start video: {args.start_video_path} (frame {args.start_frame_index}, duration {args.start_duration})")
         print(f"End video: {args.end_video_path} (frame {args.end_frame_index}, duration {args.end_duration})")
         print(f"Frames to generate: {mid_frames}")
@@ -154,7 +167,8 @@ def main():
         # Bidirectional model inference
         out = generate_bidirectional_inbetween_from_two_videos(
             base_model_path=base_model_path,
-            lora_path=args.lora_path,
+            lora_fwd_path=args.lora_fwd_path,
+            lora_bwd_path=args.lora_bwd_path,
             fusion_mlp_path=args.fusion_mlp_path,
             start_video_path=args.start_video_path,
             start_frame_index=args.start_frame_index,
