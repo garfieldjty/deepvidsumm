@@ -16,15 +16,15 @@ A modular video summarization and question-answering pipeline that uses vision-l
 
 | Input | Prompt | Answer |
 |-------|--------|--------|
-| <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/e2e/input_0.mp4" width="300"></video> | Find all the scoring goal scenes | <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/e2e/answer_0.mp4" width="300"></video> |
-| <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/e2e/input_1.mp4" width="300"></video> | Find all the scenes with trains | <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/e2e/answer_1.mp4" width="300"></video> |
+| ![input_0](demo/e2e/input_0.gif) | Find all the scoring goal scenes | ![answer_0](demo/e2e/answer_0.gif) |
+| ![input_1](demo/e2e/input_1.gif) | Find all the scenes with trains | ![answer_1](demo/e2e/answer_1.gif) |
 
 ### 2. Video Transition Generation
 
 | Original Video | Generated Video |
 |----------------|-----------------|
-| <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/transition/ori_0.mp4" width="300"></video> | <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/transition/gen_0.mp4" width="300"></video> |
-| <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/transition/ori_1.mp4" width="300"></video> | <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/transition/gen_1.mp4" width="300"></video> |
+| ![ori_0](demo/transition/ori_0.gif) | ![gen_0](demo/transition/gen_0.gif) |
+| ![ori_1](demo/transition/ori_1.gif) | ![gen_1](demo/transition/gen_1.gif) |
 
 
 ## Project Structure
