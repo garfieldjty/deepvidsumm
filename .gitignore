@@ -56,10 +56,6 @@ venv.bak/
 models/
 data/
 datasets/
-*.mp4
-*.avi
-*.mov
-*.mkv
 *.h5
 *.hdf5
 *.pkl
