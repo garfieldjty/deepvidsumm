@@ -10,6 +10,23 @@ A modular video summarization and question-answering pipeline that uses vision-l
 - **Gradio Web Interface**: User-friendly UI for uploading videos and entering prompts
 - **Video Inbetweening (LoRA)**: Custom Wan2.2 & LongCat LoRA training for video frame interpolation/generation
 
+## Demo Videos
+
+### 1. Video Query
+
+| Input | Prompt | Answer |
+|-------|--------|--------|
+| <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/e2e/input_0.mp4" width="300"></video> | Find all the scoring goal scenes | <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/e2e/answer_0.mp4" width="300"></video> |
+| <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/e2e/input_1.mp4" width="300"></video> | Find all the scenes with trains | <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/e2e/answer_1.mp4" width="300"></video> |
+
+### 2. Video Transition Generation
+
+| Original Video | Generated Video |
+|----------------|-----------------|
+| <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/transition/ori_0.mp4" width="300"></video> | <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/transition/gen_0.mp4" width="300"></video> |
+| <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/transition/ori_1.mp4" width="300"></video> | <video src="https://github.com/garfieldjty/deepvidsumm/raw/develop/demo/transition/gen_1.mp4" width="300"></video> |
+
+
 ## Project Structure
 
 ```
