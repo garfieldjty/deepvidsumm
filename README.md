@@ -95,7 +95,7 @@ Then open the Gradio link (default: `http://localhost:7860`) in your browser.
 3. Click "Generate short clip"
 4. The answer clip is saved under `runs/session_*/answer.mp4`
 
-### Video Inbetweening Training
+### Wan Video Inbetweening Training
 
 Train a LoRA adapter for video inbetweening on the Wan2.2 model:
 
@@ -109,7 +109,9 @@ Resume from a checkpoint:
 python src/train_lora_inbetween.py --config config/default_inbetween_config.yaml --resume latest
 ```
 
-### LongCat Inbetweening (DiffSynth)
+The saved weights are stored in wan-vid-inbetween/output/bidirectional_inbetween_lora.
+
+### LongCat Video Inbetweening (DiffSynth)
 
 The `dep/diffsynth` directory contains a modified version of DiffSynth-Studio with added support for LongCat video inbetweening.
 
@@ -124,6 +126,7 @@ Key modifications include:
 - **Training Script**: `examples/wanvideo/model_training/train_inbetween.py` implements the training logic for inbetweening, conditioning on start and end frames.
 - **Shell Script**: `LongCat-Video-InBetween.sh` provides a configured entry point for training with `accelerate`.
 
+The saved weights are stored in dep/diffsynth/models/train/LongCat-Video-InBetween_lora.
 
 ### Evaluation
 
